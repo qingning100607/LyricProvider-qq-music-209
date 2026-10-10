@@ -1,6 +1,6 @@
-# QQ 音乐歌词提供器 · qq-music 模块（适配 QQ 音乐 20.9.0.8）
+# QQ 音乐歌词提供器
 
-词幕（Lyricon）的 **歌词提供服务** 插件，把 QQ 音乐正在播放的歌词（原文 + 翻译）送到状态栏渲染。
+词幕（Lyricon）的 **歌词提供服务** 插件，基于原仓库适配新版QQ音乐，把 QQ 音乐正在播放的歌词（原文 + 翻译）送到状态栏渲染。
 
 - 上游项目：**[tomakino/LyricProvider](https://github.com/tomakino/LyricProvider)**（Apache-2.0）
 - 本仓库内容：上游 `qq-music` 模块 + 针对 **新版 QQ 音乐歌词引擎** 的适配修复（源码基线来自本模块的反射实现版本）
@@ -10,12 +10,12 @@
 
 ---
 
-## 一、适配环境
+## 一、测试正常的适配环境
 
 | 项 | 值 |
 |---|---|
 | QQ 音乐 | **20.9.0.8**（versionCode 7458） |
-| 词幕 | 1.0.40-rc3 及以上（Xposed） |
+| 词幕 | 1.0.40-rc3 （Xposed） |
 | Android | 13+，需 Root / LSPosed |
 | 模块版本 | versionCode 20202 / versionName **2.0.2** |
 
@@ -26,7 +26,7 @@
 | 歌词容器 | `com.lyricengine.base.k` | `e` = `CopyOnWriteArrayList<com.lyricengine.base.t>`；前三个 String 字段 = 歌名 / 歌手 / 专辑 |
 | 歌词行 | `com.lyricengine.base.t` | `a`=文本、`b`=起始(ms)、`c`=时长(ms)、`d`=行类型、`g`=逐字时间段 |
 
-## 三、改了哪些地方
+## 三、改动
 
 1. **新版引擎类名适配**（核心）
    旧代码 `for (i in 'a'..'z') { knownClassPatterns.add("com.lyricengine.base.$i") }` 会把包下多个含 `List` 字段的类都 hook 上（hook 到错的类 → 取不到歌词）。改为确定性类名 `com.lyricengine.base.k`。
@@ -37,7 +37,7 @@
 6. **翻译一对一配对**：±2s 内取"最近且未被占用"的一条（原实现取第一条，会重复配到前几行）。
 7. **纯音乐占位不覆盖正文**。
 8. **合并推送去重**：300ms 窗口内只推最后一次（词幕每次 `setSong` 都会 `reset()` 视图，重复推送会打断入场动画）。
-9. **冷启动兜底**：60 秒轮询补 hook（`hookClassLoader()` 在 Android 13+ 上无效）。
+9. **冷启动**：60 秒轮询补 hook（`hookClassLoader()` 在 Android 13+ 上无效）。
 10. 日志：`Log.i` → `dlog()`（**当前版本为空实现，零磁盘 I/O**；调用点保留，排查问题时把实现换回 `Log.i` 即可）。
 11. **行尾钳制 `clampOverlaps()`**（修"双行时切行动画不播"）：新版引擎的 `duration` 会在行尾多留一截（表头行 +600ms、歌词行 +200~1700ms），`end` 越界 → 词幕 `TimingNavigator.hasOverlap=true` → `forEachAt()` 同时返回多行 → `activeLines.size > 1` → 切行动画分支进不去。发送前把每行 `end` 钳到下一行 `begin - 1`（先按 `begin` 排序 + `nextBegin > cur.begin` 守卫，最后一行不动）。实测 *My Jealousy* 48 行里 46 行越界（最大 1721ms）→ 钳后 `hasOverlap=false`。
 12. **翻译候选"首行表头"判据**：候选首行若是「歌名 - 歌手」样式且不含当前歌名的任何词 → 判为别的歌的文档，跳过（挡住"同一位歌手的下一首"被预载进翻译位，例如放《最伟大的作品》时预载的《不能说的秘密》）。
@@ -69,7 +69,7 @@ export RELEASE_KEY_PASSWORD=xxx
 ./gradlew :qq-music:assembleRelease
 ```
 
-release 有两个坑（`proguard-rules.pro` 里已包含第一条）：
+release 的坑：（`proguard-rules.pro` 里已包含第一条）：
 
 1. `-keep class io.github.proify.lyricon.qmprovider.** { *; }` —— R8 混淆会让 `assets/xposed_init` 里的入口类名失配，模块直接失效。
 2. 某些 proot / 容器环境里需要 `android.enableResourceOptimizations=false` 和 `android.enableResourceShrinking=false`，否则产出的 APK 缺 `AndroidManifest.xml` / `resources.arsc`。
