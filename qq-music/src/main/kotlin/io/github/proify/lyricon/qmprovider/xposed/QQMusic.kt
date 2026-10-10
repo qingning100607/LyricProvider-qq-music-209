@@ -33,9 +33,11 @@ object QQMusic : YukiBaseHooker() {
     
     private var lastLyricDataHash: Int = 0
     private var currentLyricsHash: Int = 0
-    
     private var originalLyrics: List<RichLyricLine>? = null
     private var translationLyrics: List<RichLyricLine>? = null
+
+    /** 诊断用：本曲推送次数（词幕每次 setSong 都会 reset() 视图） */
+
     
     private var isLyricClassHooked = false
 
@@ -516,6 +518,64 @@ object QQMusic : YukiBaseHooker() {
                text.contains("Instrumental")
     }
     
+    /**
+     * 翻译候选的首行是不是「别的歌」的表头。
+     *
+     * QQ 会把「下一首」的歌词文档预载进内存，而下一首常常是**同一位歌手的另一首**，
+     * 元数据里的歌手能对上 —— 光靠 isCurrentSong 拦不住（歌手旁路不能删，否则
+     * 「爱情魔法！」vs「爱的魔法」这类歌名有出入的本歌容器会被误杀）。
+     *
+     * 这里只用一个特征：首行形如「歌名 - 歌手」，且连字符前面那截歌名跟当前歌名对不上 → 别的歌。
+     * 本歌的翻译容器首行一般是「QQ音乐享有本翻译作品的著作权」之类，或本歌自己的表头（歌名能对上），都不会命中。
+     */
+    private fun looksLikeOtherSongHeader(lyrics: List<RichLyricLine>): Boolean {
+        val first = lyrics.firstOrNull()?.text?.trim() ?: return false
+        // 「 - 」这种带空格的才是表头样式，歌名里带连字符的不会被误判
+        val dash = Regex("\\s[-–—]").find(first) ?: return false
+        val titlePart = normalizeForCompare(first.substring(0, dash.range.first))
+        val current = normalizeForCompare(currentSongTitle)
+        if (titlePart.isEmpty() || current.isEmpty()) return false
+
+        // 精确比对（旧写法拿整行去 contains 歌名里的词，会被"爱情"/"爱情转移"这种共享词漏过去）
+        return !(current.contains(titlePart) || titlePart.contains(current))
+    }
+
+    /** 只留字母/数字的归一化（等价于 isCurrentSong 里那套去空白/标点），用于歌名比对 */
+    private fun normalizeForCompare(x: String?): String =
+        x?.trim()?.lowercase()?.filter { it.isLetterOrDigit() } ?: ""
+
+    /** 容器元数据的歌手是不是当前歌的歌手（归一化后互相包含） */
+    private fun sameArtist(metaArtist: String?): Boolean {
+        val a = normalizeForCompare(currentSongArtist)
+        val b = normalizeForCompare(metaArtist)
+        return a.isNotEmpty() && b.isNotEmpty() && (a.contains(b) || b.contains(a))
+    }
+
+    /**
+     * 翻译候选的元数据能不能信：
+     * - 有歌名 → 信（入口 isCurrentSong 已经核过一遍）
+     * - 没歌名但有歌手且歌手就是当前歌 → 信（本歌自己缺歌名的翻译轨，如 Sacred Play Secret Place）
+     * - 歌名歌手都空 / 歌手对不上 → 基本是 QQ 预载的别的歌，不信
+     */
+    private fun translationMetaOk(meta: Array<String?>): Boolean =
+        !meta.getOrNull(0).isNullOrBlank() || sameArtist(meta.getOrNull(1))
+
+    /**
+     * 整轨几乎只有拉丁字母 → 罗马音轨（QQ 的日文歌常同时给"中文翻译轨 + 罗马音轨"）。
+     * 用途：翻译位先被罗马音占了也不怕，后面来了中文轨就替换它。
+     */
+    private fun isRomaLike(lyrics: List<RichLyricLine>): Boolean {
+        val text = lyrics.joinToString("") { it.text ?: "" }
+        var letters = 0
+        var cjk = 0
+        for (ch in text) {
+            if (ch.isLetter()) letters++
+            val c = ch.code
+            if (c in 0x3040..0x30FF || c in 0x4E00..0x9FFF || c in 0xAC00..0xD7AF) cjk++
+        }
+        return letters >= 10 && cjk * 5 < letters
+    }
+
     private fun processLyrics(lyrics: List<RichLyricLine>, meta: Array<String?>) {
         // 不是本歌的容器（别的歌的残留）直接丢弃
         if (!isCurrentSong(meta)) {
@@ -547,6 +607,9 @@ object QQMusic : YukiBaseHooker() {
             val titleWords = currentSongTitle.split(" ", "(", "（", "-", "～", "~", "[", "【")
                 .filter { it.isNotBlank() && it.length >= 2 }
             
+            // 附加判据：QQ 的文档标题常和播放器标题只差标点（"ありがとう・・・" vs "ありがとう…"），
+            // 按"歌名主体（去掉括号补充说明）+ 去标点/空格"再比一次
+            val titleKey = normalizeForCompare(currentSongTitle.substringBefore(" (").substringBefore("（"))
             val matchesCurrentSong = titleWords.any { word ->
                 firstLine.contains(word, ignoreCase = true) || 
                 lyrics.any { it.text?.contains(word, ignoreCase = true) == true }
@@ -554,23 +617,51 @@ object QQMusic : YukiBaseHooker() {
             
             dlog("Matches current song: $matchesCurrentSong")
             
-            if (!matchesCurrentSong && lyrics.size > 5) {
-                dlog("Lyrics don't match current song, skipping")
+            // 歌名主体命中（去标点后包含）也算本歌
+            val matchesByTitleKey = titleKey.isNotEmpty() &&
+                    (normalizeForCompare(firstLine).contains(titleKey) ||
+                            lyrics.any { normalizeForCompare(it.text).contains(titleKey) })
+            if (titleKey.isNotEmpty()) dlog("歌名主体比对: key=$titleKey 命中=$matchesByTitleKey")
+
+            if (!matchesCurrentSong && !matchesByTitleKey && lyrics.size > 5) {
+                // 不是本歌的原文 —— 但可能是"先到的翻译轨"（QQ 的轨顺序不固定，实测
+                // 《ありがとう…》的中文轨比日文原文先到）。带本歌元数据的就挂到翻译位，别浪费。
+                if (translationLyrics == null && translationMetaOk(meta) &&
+                    !isDuplicateOf(null, lyrics) && !looksLikeOtherSongHeader(lyrics)
+                ) {
+                    translationLyrics = lyrics
+                    dlog("非原文轨（疑似先到的翻译），改挂翻译位")
+                    scheduleMerge()
+                } else {
+                    dlog("Lyrics don't match current song, skipping")
+                }
                 return
             }
             
             originalLyrics = lyrics
             dlog("Stored as original")
-        } else if (translationLyrics == null) {
+        } else if (translationLyrics == null || isRomaLike(translationLyrics!!)) {
             if (isDuplicateOf(originalLyrics, lyrics)) {
                 dlog("翻译候选与原文内容重合（重复轨），跳过")
                 return
             }
-            // 元数据缺失的容器大多是 QQ 预载的「别的歌」，不能占翻译位
-            if (meta.getOrNull(0).isNullOrBlank()) {
-                dlog("翻译候选无歌名元数据（疑似别的歌的预载），跳过")
+            // 歌名为空、歌手也对不上 → 基本都是 QQ 预载的「别的歌」；
+            // 但歌名为空、歌手就是当前歌 → 是本歌自己缺了歌名的翻译轨（如 Sacred Play Secret Place）
+            if (!translationMetaOk(meta)) {
+                dlog("翻译候选无歌名且歌手对不上（疑似别的歌的预载），跳过")
                 return
             }
+            // 歌手对得上也可能放进同一位歌手的另一首（QQ 会预载下一首），再看一眼首行
+            if (looksLikeOtherSongHeader(lyrics)) {
+                dlog("翻译候选首行像别的歌的表头: $firstLine，跳过")
+                return
+            }
+            // 已经是罗马音轨时，别让另一条罗马音轨顶替；只有中文轨才值得替换
+            if (translationLyrics != null && isRomaLike(lyrics)) {
+                dlog("已有罗马音轨，罗马音不顶替")
+                return
+            }
+            if (translationLyrics != null) dlog("中文轨替换掉已有的罗马音轨")
             translationLyrics = lyrics
             dlog("Stored as translation")
         } else {
@@ -713,11 +804,11 @@ object QQMusic : YukiBaseHooker() {
         dlog("Title: $rawTitle")
         dlog("Artist: $artist")
         dlog("Duration: $duration")
-
         lastLyricDataHash = 0
         currentLyricsHash = 0
         originalLyrics = null
         translationLyrics = null
+        
         
         val cached = QQLyricsCache.get(songId)
         if (cached != null) {
@@ -725,31 +816,85 @@ object QQMusic : YukiBaseHooker() {
             currentLyricsHash = cached.hashCode()
             sendSong(cached)
         }
+
+        // 迟到清屏：换歌后 6 秒还没拿到本曲任何歌词（有些歌 QQ 就是没词），
+        // 就推一首空歌词，免得词幕一直挂着上一首的歌词在走。
+        // 只在本曲一次都没推过时才推空；之后真歌词到了照样能推上去（currentLyricsHash 还是 0）。
+        Thread {
+            try {
+                Thread.sleep(6000)
+            } catch (e: InterruptedException) {
+                return@Thread
+            }
+            if (songId == currentSongId && originalLyrics == null && translationLyrics == null &&
+                currentLyricsHash == 0
+            ) {
+                dlog("本曲 6 秒内没有歌词，推空歌词清屏")
+                sendEmptyLyrics()
+            }
+        }.start()
     }
 
     private fun sendLyrics(lyrics: List<RichLyricLine>) {
-        val hash = lyrics.hashCode()
+        // 新版 QQ 引擎的行尾会越界到下一行，这里钳一下（见 clampOverlaps 注释）
+        val fixed = clampOverlaps(lyrics)
+        val hash = fixed.hashCode()
         if (hash == currentLyricsHash) {
             return
         }
-        
+
         if (currentSongId.isNullOrEmpty()) {
             return
         }
 
         currentLyricsHash = hash
-        QQLyricsCache.put(currentSongId!!, lyrics)
-        sendSong(lyrics)
+        QQLyricsCache.put(currentSongId!!, fixed)
+        sendSong(fixed)
 
-        dlog("=== Lyrics (${lyrics.size} lines) ===")
-        lyrics.take(5).forEach { line ->
-            val trans = line.translation?.let { " [$it]" } ?: ""
-            dlog("[${line.begin}] ${line.text}$trans")
-        }
     }
+
+    /**
+     * 把每行的 [RichLyricLine.end] 钳到下一行 begin 之前（最后一行不动）。
+     *
+     * 新版 QQ 引擎给的 duration 会在行尾多留一截（实测：表头行固定 +600ms，歌词行 +200~1700ms），
+     * 原样透传会让词幕 `TimingNavigator.hasOverlap` 为真 → `forEachAt` 同时返回多行 →
+     * `activeLines.size > 1` → `LyricPlayerView` 的 YoYo 切行动画那一支永远进不去（退化成布局过渡）。
+     *
+     * 钳制不会改变"当前显示哪一行"（词幕 `forEachAtOrPrevious` 在空隙里仍保留上一行），
+     * 也不会影响间奏判定（`InterludeTracker` 只在 genuinely 有大间隙时才触发）。
+     */
+    private fun clampOverlaps(lines: List<RichLyricLine>): List<RichLyricLine> {
+        if (lines.size < 2) return lines
+
+        // 引擎偶尔会乱序（翻译/原文轨交错），不能想当然认为 lines 已按 begin 升序：
+        // 乱序时 nextBegin 可能小于 cur.begin，会把一条正常行钳成 1ms。先按时间排。
+        val sorted = lines.sortedBy { it.begin }
+
+        var clamped = 0
+        val out = ArrayList<RichLyricLine>(sorted.size)
+        for (i in sorted.indices) {
+            val cur = sorted[i]
+            val nextBegin = sorted.getOrNull(i + 1)?.begin
+            // nextBegin > cur.begin：begin 相同的重复行没法钳（钳了就是负长度），交给词幕原逻辑
+            if (nextBegin != null && nextBegin > cur.begin && cur.end > nextBegin) {
+                val newEnd = (nextBegin - 1).coerceAtLeast(cur.begin + 1)
+                if (newEnd < cur.end) {
+                    out.add(cur.copy(end = newEnd, duration = (newEnd - cur.begin).coerceAtLeast(1)))
+                    clamped++
+                    continue
+                }
+            }
+            out.add(cur)
+        }
+
+        if (clamped > 0) dlog("诊断[钳制]: ${lines.size} 行里钳了 $clamped 行的 end")
+        return out
+    }
+
     
     private fun sendSong(lyrics: List<RichLyricLine>) {
         if (currentSongId.isNullOrEmpty()) return
+
 
         val song = Song(
             id = currentSongId!!,
@@ -762,12 +907,14 @@ object QQMusic : YukiBaseHooker() {
         provider?.player?.setSong(song)
     }
 
-    /** logcat 在这台设备上读不到，所以同时落盘（不影响任何原有逻辑） */
+    /**
+     * 日志开关：用户担心磁盘写入影响性能，已改成空实现（零 I/O）。
+     * 调用点全部保留，要排查问题时把实现换回下面两行即可：
+     *   Log.i(TAG, msg)
+     *   File("/data/data/com.tencent.qqmusic/files/lyricon_debug.log").appendText(...)
+     * （带日志的完整版本另存了一份：/sdcard/Download/qq-music-src/QQMusic-withlogs.kt）
+     */
+    @Suppress("UNUSED_PARAMETER")
     private fun dlog(msg: String) {
-        Log.i(TAG, msg)
-        runCatching {
-            val f = java.io.File("/data/data/com.tencent.qqmusic/files/lyricon_debug.log")
-            f.appendText(java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US).format(java.util.Date()) + "  " + msg + "\n")
-        }
     }
 }

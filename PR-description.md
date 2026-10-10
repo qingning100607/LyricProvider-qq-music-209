@@ -35,6 +35,8 @@
 8. 合并推送去重：300ms 窗口内只推最后一次（词幕每次 `setSong` 都会 `reset()` 视图，重复推送会打断入场动画）
 9. 冷启动兜底：60s 轮询补 hook（`hookClassLoader()` 在 Android 13+ 上无效）
 10. 日志：`Log.i` → `dlog()`（写入 `files/lyricon_debug.log`，本机 logcat 不可用时的唯一验证手段；**不想要可以整段删掉**）
+11. **行尾钳制**：`clampOverlaps()` 把每行 `end` 钳到下一行 `begin - 1`（最后一行不动）。新版引擎的 `duration` 会在行尾多留一截（表头行 +600ms、歌词行 +200~1700ms），`end` 越界会让词幕 `TimingNavigator.hasOverlap=true` → `forEachAt()` 返回多行 → `activeLines.size > 1` → `LyricPlayerView` 的 YoYo 切行动画分支进不去（实测 48 行里有 46 行越界，最大 1721ms；钳制后 `hasOverlap=false`）
+12. **翻译候选"首行表头"判据**：候选首行若是「歌名 - 歌手」样式且不含当前歌名的任何词 → 判为别的歌的文档，跳过（挡住"同一位歌手的下一首"被预载进翻译位，例如放《最伟大的作品》时预载的《不能说的秘密》）
 
 **不下发任何逐字/动画数据**：不写 `RichLyricLine.words` / `translationWords`，代码里没有 `LyricWord`；动画、进度、行切换全部由词幕控制。
 
@@ -44,18 +46,23 @@
 丢弃非本歌容器: 歌名=虚拟, 歌手=陈粒
 
 翻译候选无歌名元数据（疑似别的歌的预载），跳过
+翻译候选首行像别的歌的表头: 不能说的秘密 - 周杰伦 (Jay Chou)，跳过
 
-[0]    好きだから。 - 『ユイカ』 [并不是因为你的帅气才喜欢上你]
-[3717] 好きだからかっこいいんだよ [是因为喜欢上你后才发觉你的帅气]
+诊断[钳制]: 81 行里钳了 51 行的 end
+诊断[重叠]: 行数=81 重叠条数=0 最大越界=0ms hasOverlap=false
 
-[12114] Staring at stars watching the moon [凝望着漫天繁星 注视着明月]
-[18041] Hoping that one day they'll lead me to you [希望有朝一日 它们会指引我来到你身边]
+[0-4102]    好きだから。 - 『ユイカ』 [并不是因为你的帅气才喜欢上你]
+[3717-6652] 好きだからかっこいいんだよ [是因为喜欢上你后才发觉你的帅气]
+
+[7878-10783] 'Cos of my jealousy [皆因我的嫉妒心作祟]
+[10784-14391] That's what I can see [这一点我心知肚明]
 ```
 
 ## 副作用 / 已知限制
 
 - 若某首歌的**真翻译**容器也没有歌名元数据，会退化成单行（日志会打 `翻译候选无歌名元数据…跳过`）
-- 词幕侧 2 个可见槽位的限制导致双行时切行动画不播（`LyricPlayerView.syncViews` 仅在"恰好 1 个视图被替换"时 `animateUpdate()`），与本插件无关
+- 词幕侧"双行时切行动画不播"：**根因在提供器侧**，本次由 `clampOverlaps()` 修复 —— 行间 `end` 越界会让词幕 `TimingNavigator.hasOverlap=true` → `forEachAt()` 同时返回多行 → `activeLines.size > 1`，`LyricPlayerView` 那支"恰好 1 行被替换 → YoYo 切行动画"的分支就进不去。钳制后实测 `hasOverlap=false`。
+  （早期版本这里写过"双行占 2 个视图所以不播动画"，经核对 `tomakino/lyricon@c93da0e` 后确认是错的：双行是同一个 `RichLyricLineView` 内的 `main`+`secondary`，`activeLines` 数的是歌词行。）
 
 ## 建议的 commit 拆分
 
