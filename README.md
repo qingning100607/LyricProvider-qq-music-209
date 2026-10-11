@@ -58,19 +58,6 @@ rm -rf qq-music && cp -r /path/to/this-repo/qq-music ./
 # 3. debug
 ./gradlew :qq-music:assembleDebug
 
-# 4. release（需要自己的签名）
-export RELEASE_STORE_FILE=/path/to/your.jks
-export RELEASE_STORE_PASSWORD=xxx
-export RELEASE_KEY_ALIAS=xxx
-export RELEASE_KEY_PASSWORD=xxx
-./gradlew :qq-music:assembleRelease
-```
-
-release 有两个坑（`proguard-rules.pro` 里已经包含第一条）：
-
-1. `-keep class io.github.proify.lyricon.qmprovider.** { *; }`：R8 混淆会让 `assets/xposed_init` 里的入口类名失配，模块直接失效。
-2. 某些 proot / 容器环境需要 `android.enableResourceOptimizations=false` 和 `android.enableResourceShrinking=false`，否则产出的 APK 会缺 `AndroidManifest.xml` / `resources.arsc`。
-
 ## 安装
 
 编译好的 APK 在 [Releases](https://github.com/qingning100607/LyricProvider-qq-music-209/releases)。
