@@ -25,28 +25,48 @@ object QQMusic : YukiBaseHooker() {
     private const val PLAYER_SERVICE_PROCESS = "com.tencent.qqmusic:QQPlayerService"
 
     private var provider: LyriconProvider? = null
+    @Volatile
     private var isInitialized = false
-    
+
+    // 下面这些会被多个线程碰：MediaSession 回调线程（换歌/播放状态）、
+    // QQ 的构造器线程（抽歌词）、以及本模块自己起的合并线程与 watchdog。
+    // 加 @Volatile 只是保证"改完能被别的线程看见"，逻辑没动。
+    @Volatile
     private var currentSongId: String? = null
+    @Volatile
     private var currentSongTitle: String = ""
+    @Volatile
     private var currentSongArtist: String = ""
+    @Volatile
     private var currentSongDuration: Long = 0
-    
+
+    @Volatile
     private var lastLyricDataHash: Int = 0
+    @Volatile
     private var currentLyricsHash: Int = 0
+    @Volatile
     private var originalLyrics: List<RichLyricLine>? = null
+    @Volatile
     private var translationLyrics: List<RichLyricLine>? = null
 
-    // 引擎逐字时间里的真实唱段：key = 起始ms|文本 -> [首字起点, 末字终点]
-    private val sungRanges = HashMap<String, LongArray>()
+    /** 引擎自带的"真实唱段"区间：key = 起始ms|文本，值是 [第一个字的开始, 最后一个字的结束] */
+    // 抽歌词在 QQ 的构造器线程，读它在合并线程，clear() 又在换歌回调里 —— 用并发容器免得撞车
+    private val sungRanges = java.util.concurrent.ConcurrentHashMap<String, LongArray>()
 
-    // 高亮区间对齐后，行最多比第一个字提前显示的毫秒数
+    /** 高亮区间对齐后，行最多比"第一个字"提前显示的毫秒数（QQ 原生最多提前 2 秒） */
     private val HEAD_LEAD_MS = 300L
+    /** 原文轨 / 翻译轨配对的时间窗：两条轨同一句的时间差要落在这个范围内（常见 0~2 秒） */
+    private val TRANS_MATCH_MS = 3000L
+    /** 向后多看一行时，必须比当前这一行"近"这么多毫秒才改选（避免翻译轨整体延迟时把整条轨错位一格） */
+    private val TRANS_PREFER_MS = 300L
+    /** 判定"这一段翻译轨对得很紧"的阈值：最近几对的时间差都小于它就认为没有整体偏移 */
+    private val TRANS_TIGHT_MS = 600L
 
-    
+
+    @Volatile
     private var isLyricClassHooked = false
 
-    // 合并推送：短时间内多个文档各推一次会让词幕反复 reset 视图，只推最后一次
+    /** 合并推送：短时间内多个文档各推一次会让词幕反复 reset() 视图，这里只推最后一次 */
     private val mergeLock = Any()
     @Volatile
     private var mergeVersion: Long = 0L
@@ -84,7 +104,7 @@ object QQMusic : YukiBaseHooker() {
         return same.toDouble() / n >= 0.6
     }
 
-    // 冷启动保险：容器类可能比 hook 时机更晚加载，轮询补 hook
+    /** 冷启动保险：容器类可能比 hook 时机更晚加载，轮询补 hook */
     private fun startHookWatchdog() {
         Thread {
             val deadline = System.currentTimeMillis() + 60_000L
@@ -110,6 +130,7 @@ object QQMusic : YukiBaseHooker() {
     private var detectedLineClassFields: Map<String, Field>? = null
 
     override fun onHook() {
+
         if (processName != PLAYER_SERVICE_PROCESS) {
             return
         }
@@ -146,6 +167,7 @@ object QQMusic : YukiBaseHooker() {
     }
 
     private fun hookClassLoader() {
+        
         try {
             val pathClassLoader = appClassLoader ?: return
             val classLoaderClass = pathClassLoader.javaClass
@@ -202,6 +224,7 @@ object QQMusic : YukiBaseHooker() {
         if (isLyricClassHooked) return
         
         try {
+            
             val linesField = findLinesField(clazz)
             if (linesField == null) {
                 Log.d(TAG, "No suitable lines field found in ${clazz.name}")
@@ -209,7 +232,9 @@ object QQMusic : YukiBaseHooker() {
             }
             
             detectedLinesFieldName = linesField.name
+            
             val constructors = clazz.declaredConstructors
+            
             constructors.forEach { constructor ->
                 constructor.hook {
                     after {
@@ -222,16 +247,20 @@ object QQMusic : YukiBaseHooker() {
             hookLyricMethods(clazz)
             
             isLyricClassHooked = true
+            
         } catch (e: Exception) {
             Log.e(TAG, "Failed to hook lyric class ${clazz.name}: ${e.message}")
         }
     }
-    
+
     private fun hookLyricMethods(clazz: Class<*>) {
+        
         val methods = clazz.declaredMethods
+        
         methods.take(20).forEach { method ->
             val methodName = method.name
             val paramCount = method.parameterCount
+            
             
             try {
                 method.hook {
@@ -258,6 +287,7 @@ object QQMusic : YukiBaseHooker() {
     }
 
     private fun extractLyricsDynamic(instance: Any) {
+        
         val hash = System.identityHashCode(instance)
         if (hash == lastLyricDataHash) {
             return
@@ -278,6 +308,7 @@ object QQMusic : YukiBaseHooker() {
             if (lines.isNullOrEmpty()) {
                 return
             }
+            
             
             val firstLine = lines.firstOrNull()
             if (firstLine == null) return
@@ -307,8 +338,10 @@ object QQMusic : YukiBaseHooker() {
                     } ?: 0L
                     
                     if (text.isNotBlank() && text != "//") {
-                        // 记下引擎逐字段的首尾，供高亮区间对齐用（逐字数据不下发）
-                        engineWords(line, text)?.let { words ->
+                        // 引擎自带的逐字时间段：既下发给词幕（高亮按每个字的时间走），
+                        // 也记下"这句真正从哪一刻唱到哪一刻"，供后面的窗口对齐用（见 alignHighlightSpan）
+                        val words = engineWords(line, text)
+                        if (words != null) {
                             sungRanges[sungKey(startTime, text)] = longArrayOf(words.first().begin, words.last().end)
                         }
                         lyricLines.add(RichLyricLine(
@@ -316,6 +349,7 @@ object QQMusic : YukiBaseHooker() {
                             end = startTime + duration,
                             duration = duration,
                             text = text,
+                            words = words,
                             translation = null
                         ))
                     }
@@ -365,16 +399,18 @@ object QQMusic : YukiBaseHooker() {
             fields["duration"] = numberFields[1]
         }
         
+        
         detectedLineClassFields = fields
         return fields
     }
 
     private fun fallbackHookKnownClasses() {
+        
         val knownClassPatterns = mutableListOf<String>()
         
-        // ===== 新版引擎（QQ 音乐 20.9.0.8）的歌词容器类 =====
-        // 旧版按 a~z 扫"名字带 lyric 且有 List 字段"的类，会 hook 错类；
-        // 新版类名确定：com.lyricengine.base.k（字段 e = CopyOnWriteArrayList，行对象 t）
+        // ===== 唯一的适配改动：新引擎（QQ音乐 20.9.0.8）的歌词容器类 =====
+        // 旧版是按 a~z 暴力扫"名字里带 lyric 且有 List 字段"的类，会 hook 错类；
+        // 新版确定性类名是 com.lyricengine.base.k（字段 e = CopyOnWriteArrayList，行对象 t）
         knownClassPatterns.add("com.lyricengine.base.k")
         knownClassPatterns.addAll(listOf(
             "com.tencent.qqmusic.common.utils.lyric.f",
@@ -387,6 +423,7 @@ object QQMusic : YukiBaseHooker() {
             try {
                 val clazz = className.toClassOrNull(appClassLoader)
                 if (clazz != null) {
+                    
                     val hasListField = clazz.declaredFields.any { field ->
                         java.util.List::class.java.isAssignableFrom(field.type)
                     }
@@ -400,7 +437,7 @@ object QQMusic : YukiBaseHooker() {
             }
         }
     }
-    
+
     private fun hookAllConstructors(clazz: Class<*>) {
         if (isLyricClassHooked) return
         
@@ -409,6 +446,7 @@ object QQMusic : YukiBaseHooker() {
             if (linesField == null) return
             
             detectedLinesFieldName = linesField.name
+            
             clazz.declaredConstructors.forEach { constructor ->
                 constructor.hook {
                     after {
@@ -427,10 +465,12 @@ object QQMusic : YukiBaseHooker() {
             Log.e(TAG, "Failed to hook ${clazz.name}: ${e.message}")
         }
     }
-    
-    // 引擎内存里同时存在多首歌的歌词容器（上一首/下一首的残留），而源码只按"第一个到的算
-    // 原文、第二个到的算翻译"来区分，分不出容器属于谁，别人的歌词就会进翻译位。
-    // 容器自带歌名/歌手字段，这里只用它做一件事：不是当前播放的歌就丢弃。
+
+    // ===== 唯一新增的判定 =====
+    // 引擎内存里同时存在多首歌的歌词容器（上一首/下一首的残留），而源码里
+    // “第一个到的算原文、第二个到的算翻译”分不出容器属于谁 —— 别人的歌词就会进翻译位。
+    // 容器本身自带歌名/歌手字段（引擎自己判“首行是不是头部行”用的就是它），
+    // 这里只用它做一件事：不是当前播放的歌 -> 丢弃。
     private var containerStringFields: List<java.lang.reflect.Field>? = null
 
     private fun containerMeta(instance: Any): Array<String?> {
@@ -473,11 +513,17 @@ object QQMusic : YukiBaseHooker() {
                text.contains("instrumental") ||
                text.contains("Instrumental")
     }
-    
-    // 翻译候选的首行是不是别的歌的表头。
-    // QQ 会预载下一首的歌词文档，下一首常常是同一位歌手的另一首，歌手元数据对得上，
-    // 所以还要看首行：形如「歌名 - 歌手」且歌名跟当前歌对不上的，当成别的歌丢掉。
-    // 本歌的翻译容器首行是版权声明或对得上的表头，不会命中。
+
+    /**
+     * 翻译候选的首行是不是「别的歌」的表头。
+     *
+     * QQ 会把「下一首」的歌词文档预载进内存，而下一首常常是同一位歌手的另一首，
+     * 元数据里的歌手能对上 —— 光靠 isCurrentSong 拦不住（歌手旁路不能删，否则
+     * 「爱情魔法！」vs「爱的魔法」这类歌名有出入的本歌容器会被误杀）。
+     *
+     * 这里只用一个特征：首行形如「歌名 - 歌手」，且连字符前面那截歌名跟当前歌名对不上，就当成别的歌。
+     * 本歌的翻译容器首行一般是「QQ音乐享有本翻译作品的著作权」之类，或本歌自己的表头（歌名能对上），都不会命中。
+     */
     private fun looksLikeOtherSongHeader(lyrics: List<RichLyricLine>): Boolean {
         val first = lyrics.firstOrNull()?.text?.trim() ?: return false
         // 「 - 」这种带空格的才是表头样式，歌名里带连字符的不会被误判
@@ -501,14 +547,19 @@ object QQMusic : YukiBaseHooker() {
         return a.isNotEmpty() && b.isNotEmpty() && (a.contains(b) || b.contains(a))
     }
 
-    // 翻译候选的元数据能不能信：有歌名就信（入口已经核过一遍）；
-    // 没歌名但歌手是当前歌也信（本歌缺歌名的翻译轨）；
-    // 歌名歌手都空、或歌手对不上，基本都是预载的别的歌，不信。
+    /**
+     * 翻译候选的元数据能不能信：
+     * - 有歌名就信（入口 isCurrentSong 已经核过一遍）
+     * - 没歌名但有歌手、而且歌手就是当前歌，也信（本歌自己缺歌名的翻译轨，如 Sacred Play Secret Place）
+     * - 歌名歌手都空、或者歌手对不上，基本是 QQ 预载的别的歌，不信
+     */
     private fun translationMetaOk(meta: Array<String?>): Boolean =
         !meta.getOrNull(0).isNullOrBlank() || sameArtist(meta.getOrNull(1))
 
-    // 整轨几乎只有拉丁字母就是罗马音轨（日文歌常同时给中文轨和罗马音轨）。
-    // 翻译位先被罗马音占了也没关系，后面来了中文轨可以替换它。
+    /**
+     * 整轨几乎只有拉丁字母，就是罗马音轨（QQ 的日文歌常同时给"中文翻译轨 + 罗马音轨"）。
+     * 用途：翻译位先被罗马音占了也不怕，后面来了中文轨就替换它。
+     */
     private fun isRomaLike(lyrics: List<RichLyricLine>): Boolean {
         val text = lyrics.joinToString("") { it.text ?: "" }
         var letters = 0
@@ -521,8 +572,10 @@ object QQMusic : YukiBaseHooker() {
         return letters >= 10 && cjk * 5 < letters
     }
 
-    // 文档开头的词曲/制作人员行标签（词：、曲：、Lyrics by：、Composed by： …）。
-    // 这些行照常显示，只是不参与翻译配对。
+    /**
+     * 制作人员/版权信息行的标签（QQ 文档开头那一串「词：/曲：/Lyrics by：/Composed by：…」）。
+     * 这些行照常显示，只是不该拿别人的翻译。
+     */
     private val CREDIT_LABELS = listOf(
         "lyrics by", "composed by", "produced by", "published by", "vocals by",
         "background vocals", "co-producer", "mixing engineer", "mastering engineer",
@@ -531,16 +584,20 @@ object QQMusic : YukiBaseHooker() {
         "词：", "曲：", "编曲：", "作词：", "作曲：", "制作人：", "混音：", "母带：", "录音：", "出品：", "监制："
     )
 
-    // 不参与翻译配对的行：文档表头（歌名 - 歌手），以及词曲/制作人员行。
-    // 它们都挤在文档开头，跟第一句歌词只差一两百毫秒，参与配对会抢走第一句的翻译。
+    /**
+     * 是不是「不参与翻译配对」的非歌词行：文档表头（歌名 - 歌手）或制作人员/版权行。
+     * 依据：新版引擎里这些行都挤在开头 0~2.4 秒，和第一句歌词只差一两百毫秒，
+     * 一旦参与配对就会把第一句的中文抢走。
+     */
     private fun isCreditOrHeaderLine(line: RichLyricLine, docFirstLine: String?): Boolean {
         val t = line.text?.trim() ?: return true
         if (t.isEmpty()) return true
         // 半角冒号归一化，免得"作词:李荣浩"漏掉
         val lower = t.lowercase().replace(':', '：')
-        // 这些行都写在行首，所以只认行首，免得歌词里出现"作曲"之类的词被误判
+        // 制作人员行/词曲行一律写在行首（"Lyrics by：…"、"词：李荣浩"、"编曲：…"），
+        // 所以只认行首：用 contains 会被"你为我作曲"这类歌词正文骗到
         if (CREDIT_LABELS.any { lower.startsWith(it) }) return true
-        // 表头只可能是文档第一行，且形如「歌名 - 歌手」（连字符前后带空格）
+        // 只有文档第一行才可能是表头，且必须形如「歌名 - 歌手」（带空格的连字符）
         return t == docFirstLine?.trim() && Regex("\\s[-–—]\\s?").containsMatchIn(t)
     }
 
@@ -552,6 +609,7 @@ object QQMusic : YukiBaseHooker() {
 
         val lastLineEnd = lyrics.lastOrNull()?.end ?: 0
         val firstLine = lyrics.firstOrNull()?.text ?: ""
+        
         
         if (isInstrumentalPlaceholder(lyrics)) {
             if (originalLyrics != null || currentLyricsHash != 0) {
@@ -576,13 +634,15 @@ object QQMusic : YukiBaseHooker() {
                 lyrics.any { it.text?.contains(word, ignoreCase = true) == true }
             }
             
+            
             // 歌名主体命中（去标点后包含）也算本歌
             val matchesByTitleKey = titleKey.isNotEmpty() &&
                     (normalizeForCompare(firstLine).contains(titleKey) ||
                             lyrics.any { normalizeForCompare(it.text).contains(titleKey) })
+
             if (!matchesCurrentSong && !matchesByTitleKey && lyrics.size > 5) {
-                // 不是本歌的原文：可能是先到的翻译轨（两条轨的先后顺序不固定）。
-                // 带本歌元数据的就挂到翻译位，别浪费。
+                // 不是本歌的原文，但可能是"先到的翻译轨"（QQ 的轨顺序不固定，
+                // 中文轨可能比日文原文先到）。带本歌元数据的就挂到翻译位。
                 if (translationLyrics == null && translationMetaOk(meta) &&
                     !looksLikeOtherSongHeader(lyrics)
                 ) {
@@ -598,8 +658,8 @@ object QQMusic : YukiBaseHooker() {
             if (isDuplicateOf(originalLyrics, lyrics)) {
                 return
             }
-            // 歌名为空、歌手也对不上 → 基本都是 QQ 预载的「别的歌」；
-            // 但歌名为空、歌手就是当前歌 → 是本歌自己缺了歌名的翻译轨（如 Sacred Play Secret Place）
+            // 歌名为空、歌手也对不上，基本都是 QQ 预载的「别的歌」；
+            // 但歌名为空、歌手就是当前歌，是本歌自己缺了歌名的翻译轨（如 Sacred Play Secret Place）
             if (!translationMetaOk(meta)) {
                 return
             }
@@ -612,12 +672,14 @@ object QQMusic : YukiBaseHooker() {
                 return
             }
             translationLyrics = lyrics
+            lyrics.sortedBy { it.begin }.take(6).forEach { t ->
+            }
         } else {
         }
         
         scheduleMerge()
     }
-    
+
     private fun sendEmptyLyrics() {
         if (currentSongId.isNullOrEmpty()) return
         
@@ -631,7 +693,7 @@ object QQMusic : YukiBaseHooker() {
         
         provider?.player?.setSong(song)
     }
-    
+
     private fun mergeAndSendLyrics() {
         val original = originalLyrics
         // 去掉“著作权声明/来源说明”行，避免被配到开头几行
@@ -639,6 +701,7 @@ object QQMusic : YukiBaseHooker() {
             val t = line.text
             t != null && NOTICE_KEYWORDS.any { t.contains(it) }
         }
+        
         
         if (original == null && translation == null) {
             return
@@ -656,32 +719,56 @@ object QQMusic : YukiBaseHooker() {
         
         val merged = mutableListOf<RichLyricLine>()
 
-        // 原文轨和翻译轨是逐行对应的两条时间轴，按顺序一对一配。
-        // 源码那种"每条原文取 ±2 秒内第一条翻译"的写法，会被表头和词曲/制作人员行抢走
-        // 第一句的翻译；反过来"每条翻译取最近原文行"又会在翻译轨整体晚一秒多时把翻译
-        // 吸到后一句上。所以先剔掉不参与配对的行，再按顺序对齐，只接受时间相近（<2 秒）的一对。
+        // 配对：QQ 的原文轨和翻译轨是同两条时间轴，正常情况下逐行一一对应
+        //（两条轨正常情况下逐行一一对应），按顺序对齐即可。
+        //   ·源码写法「每条原文行取 ±2 秒内第一条翻译」会被表头（0ms）和「词：/曲：/Lyrics by：」
+        //    这类制作人员行抢走第一句的翻译（它们跟第一句只差一两百毫秒）；
+        //   ·反过来「每条翻译取全局最近的原文行」又会在翻译轨整体延迟约 1.4 秒时
+        //    把翻译吸到后一句上（《Alone》第 2、4 句只剩原文）。
+        // 所以这里：先剔掉不参与配对的表头/制作人员行，再按顺序对齐，只接受时间相近的一对。
+        // 另外翻译轨偶尔会缺一两条（有的歌某一句就是没有译文），
+        // 此时"顺序上第一条"会把下一句的翻译吸过来、缺的那句反而空白，所以窗口内多看一行、取时间更近的那行。
         val transList = translation!!
         val transDocFirst = transList.minByOrNull { it.begin }?.text
-        // 翻译轨同样可能带表头/制作人员行，它们也不参与配对，否则会把整条轨顶得错位一格
+        // 翻译轨也可能带表头/制作人员行（双语文档里"作词：…"这类会被翻译成中文），
+        // 它们同样不参与配对，否则会顶掉第一句歌词的翻译、把整条轨错位一格
         val transLyrics = transList.filterNot { isCreditOrHeaderLine(it, transDocFirst) }
         val assignedTrans = HashMap<Int, String>()   // 原文行下标 -> 翻译文本
+        val transToOrig = HashMap<Int, Int>()        // 翻译下标 -> 原文下标（-1=没配上）
+
         val origSortedIdx = original!!.indices.sortedBy { original!![it].begin }
         val docFirstLine = original!!.getOrNull(origSortedIdx.firstOrNull() ?: 0)?.text
         val lyricIdx = origSortedIdx.filterNot { isCreditOrHeaderLine(original!![it], docFirstLine) }
+
         val transSorted = transLyrics.sortedBy { it.begin }
+        // 最近几对的时间差：用来判断"这一段轨对不对得紧"（紧 = 翻译轨没有整体偏移）
+        val recentDelta = ArrayDeque<Long>()
         var li = 0
-        for (trans in transSorted) {
+        var switched = 0
+        for ((ti, trans) in transSorted.withIndex()) {
             // 越过时间上明显更早、又没等到翻译的歌词行
-            while (li < lyricIdx.size && original!![lyricIdx[li]].begin < trans.begin - 2000) li++
-            // 按顺序取第一条时间相近的歌词行；当前这条超出窗口时，允许往后跳 1 行
+            while (li < lyricIdx.size && original!![lyricIdx[li]].begin < trans.begin - TRANS_MATCH_MS) li++
+            val d0 = if (li < lyricIdx.size) {
+                kotlin.math.abs(trans.begin - original!![lyricIdx[li]].begin)
+            } else Long.MAX_VALUE
+            val d1 = if (li + 1 < lyricIdx.size) {
+                kotlin.math.abs(trans.begin - original!![lyricIdx[li + 1]].begin)
+            } else Long.MAX_VALUE
+            // 默认：顺序取第一条落在窗内的歌词行。
+            // 这个默认对"整条翻译轨统一晚一截"的歌最稳（错开一格就全错了）。
             var pick = -1
-            var probe = li
-            while (probe < lyricIdx.size && probe <= li + 1) {
-                if (kotlin.math.abs(trans.begin - original!![lyricIdx[probe]].begin) < 2000) {
-                    pick = probe
-                    break
-                }
-                probe++
+            if (d0 < TRANS_MATCH_MS) pick = li
+            if (pick == -1 && d1 < TRANS_MATCH_MS) pick = li + 1
+            // 改选下一行的情形：QQ 的翻译轨少了一条（有的歌某一句就是没有译文），
+            // 这时"顺序第一条"会把下一句的译文吸到上一句、缺的那句反而空白。
+            // 但必须同时满足三个条件才敢改，免得把"整条轨有偏移"的歌弄错位：
+            //   ① 当前这行确实对得远（>= 1 秒）；② 下一行比它近得多；③ 这一段轨本身对得很紧。
+            val tight = (recentDelta.minOrNull() ?: Long.MAX_VALUE) <= TRANS_TIGHT_MS
+            if (pick == li && d1 < TRANS_MATCH_MS && d0 >= 1000 &&
+                d1 + TRANS_PREFER_MS <= d0 && tight
+            ) {
+                pick = li + 1
+                switched++
             }
             if (pick >= 0) {
                 val oIdx = lyricIdx[pick]
@@ -689,8 +776,11 @@ object QQMusic : YukiBaseHooker() {
                 val text = trans.text
                 if (text != null && text != origLine.text && text != "//" && text.isNotBlank()) {
                     assignedTrans[oIdx] = text
+                    transToOrig[ti] = oIdx
                 }
                 li = pick + 1
+                recentDelta.addLast(kotlin.math.abs(trans.begin - origLine.begin))
+                while (recentDelta.size > 3) recentDelta.removeFirst()
             }
         }
         original!!.forEachIndexed { i, origLine ->
@@ -699,6 +789,7 @@ object QQMusic : YukiBaseHooker() {
                 end = origLine.end,
                 duration = origLine.duration,
                 text = origLine.text,
+                words = origLine.words,
                 translation = assignedTrans[i]
             ))
         }
@@ -760,14 +851,17 @@ object QQMusic : YukiBaseHooker() {
         originalLyrics = null
         translationLyrics = null
         sungRanges.clear()
+        
+        
         val cached = QQLyricsCache.get(songId)
         if (cached != null) {
             currentLyricsHash = cached.hashCode()
             sendSong(cached)
         }
 
-        // 换歌后 6 秒还没拿到本曲任何歌词（有些歌 QQ 就是没词），推一次空歌词清屏，
-        // 免得词幕一直挂着上一首在走。只在本曲一次都没推过时执行，之后真歌词到了照常推送。
+        // 迟到清屏：换歌后 6 秒还没拿到本曲任何歌词（有些歌 QQ 就是没词），
+        // 就推一首空歌词，免得词幕一直挂着上一首的歌词在走。
+        // 只在本曲一次都没推过时才推空；之后真歌词到了照样能推上去（currentLyricsHash 还是 0）。
         Thread {
             try {
                 Thread.sleep(6000)
@@ -783,8 +877,8 @@ object QQMusic : YukiBaseHooker() {
     }
 
     private fun sendLyrics(lyrics: List<RichLyricLine>) {
-        // 引擎行尾会越界到下一行，先钳一下（见 clampOverlaps）
-        val aligned = alignHighlightSpan(clampOverlaps(lyrics))
+        // 新版 QQ 引擎的行尾会越界到下一行，这里钳一下（见 clampOverlaps 注释）
+        val aligned = fitWordsToWindow(alignHighlightSpan(clampOverlaps(lyrics)))
         val hash = aligned.hashCode()
         if (hash == currentLyricsHash) {
             return
@@ -802,15 +896,25 @@ object QQMusic : YukiBaseHooker() {
 
     private fun sungKey(begin: Long, text: String?): String = "$begin|${text.orEmpty()}"
 
-    // 把高亮扫描区间收窄到这句真正唱的那一段。
-    //
-    // 没有逐词数据时，词幕会把整行当成一个词、按 duration 匀速扫完；而 QQ 的行 duration
-    // 是"到下一句开始的时间"，含句间停顿（有的行窗口二十多秒，实际只唱一秒），
-    // 于是高亮越到句尾越落后于人声。这里按引擎逐字段把区间收到真实唱段上：
-    // duration = 从显示起点扫到末字结束；begin 最多比首字提前 HEAD_LEAD_MS 显示。
-    // end 不动，所以行的显示时长和间奏判定不受影响；begin 变晚会让这一行比原来晚一点出现，
-    // 在它出现之前词幕仍然显示上一行。
-    // 逐字数据缺失或算出来不合理时原样返回。
+    /**
+     * 按引擎自带的逐字时间段，把"高亮扫描区间"收窄到这句真正唱的那一段。
+     *
+     * 背景：词幕的「相对进度高亮」在没有逐词数据时，会把整行当成一个词、以 [RichLyricLine.duration]
+     * 为时长匀速扫完，而 QQ 的行 duration 是"到下一句开始的时间"（含句间停顿，
+     * 有一行窗口 27 秒、实际只唱 0.8 秒的情况），于是高亮越到句尾越落后于人声。
+     *
+     * 改动两处（这是有意为之的取舍，不是"什么都不变"）：
+     * - `duration`：改成"从显示起点扫到最后一个字结束"，高亮扫完的时刻 = 人声唱完的时刻；
+     * - `begin`：最多比"第一个字"提前 [HEAD_LEAD_MS] 显示（QQ 原生最多提前 2 秒）。
+     *
+     * 副作用：
+     * - `begin` 变晚，词幕的活跃判定 `begin <= pos <= end` 随之改变，这一行出现得比原来晚
+     *   （最多约 1.7 秒），而在它出现之前 `forEachAtOrPrevious` 会继续显示上一行，
+     *   也就是"上一行唱完还挂着一会儿"；
+     * - `end` 不动，所以行显示到什么时候、以及 `InterludeTracker` 的间奏判定都不受影响。
+     *
+     * 逐字时间段缺失、时间不合法、或算出来反而更长时，一律原样返回（退回源码行为）。
+     */
     private fun alignHighlightSpan(lines: List<RichLyricLine>): List<RichLyricLine> {
         if (sungRanges.isEmpty()) return lines
         var n = 0
@@ -818,7 +922,8 @@ object QQMusic : YukiBaseHooker() {
             val range = sungRanges[sungKey(line.begin, line.text)] ?: return@map line
             val sungBegin = range[0]
             val sungEnd = range[1]
-            // 行首最多提前 HEAD_LEAD_MS 显示，且必须严格小于 end（相等会被词幕丢掉）
+            // 行首最多提前 HEAD_LEAD_MS 显示；并且必须严格小于 end
+            //（begin == end 会被词幕当成非法行整行丢掉）
             var newBegin = maxOf(line.begin, sungBegin - HEAD_LEAD_MS)
             if (newBegin >= line.end) newBegin = line.end - 1
             val newDuration = sungEnd - newBegin
@@ -832,10 +937,48 @@ object QQMusic : YukiBaseHooker() {
         return out
     }
 
-    // 把每行的 end 钳到下一行 begin 之前（最后一行不动）。
-    // 引擎给的 duration 会在行尾多留一截（表头 +600ms，歌词行 +200~1700ms），原样透传
-    // 会让相邻行时间轴重叠，词幕据此认为"同时有多行活跃"，切行动画就走不到。
-    // 钳制不改变当前显示哪一行（空隙里词幕仍保留上一行），也不影响间奏判定。
+    /**
+     * 把每行的逐字时间段裁进本行自己的窗口 [begin, end]。
+     *
+     * 引擎给的逐字时间是绝对毫秒。行尾被 [clampOverlaps] 钳过之后，一行最后几个字可能落到窗口外面；
+     * 词幕拿到逐字数据后是按"字"推进高亮的，越界的字会让这一行的高亮一直动到窗口之外，
+     * 切行时就会和下一行的高亮同时走（看起来像两行的动画叠在一起）。
+     *
+     * 只裁逐字时间，窗口本身不动：这一行什么时候出现、什么时候切走都和原来一样。
+     */
+    private fun fitWordsToWindow(lines: List<RichLyricLine>): List<RichLyricLine> {
+        var n = 0
+        var worst = 0L
+        val out = lines.map { line ->
+            val words = line.words
+            if (words.isNullOrEmpty()) return@map line
+            if (words.last().end <= line.end && words.first().begin >= line.begin) return@map line
+            val over = words.last().end - line.end
+            if (over > 0) {
+                n++
+                if (over > worst) worst = over
+            }
+            val kept = words.filter { it.end > line.begin && it.begin < line.end }.map { w ->
+                val b = maxOf(w.begin, line.begin)
+                val e = minOf(w.end, line.end)
+                if (b == w.begin && e == w.end) w
+                else LyricWord(text = w.text, begin = b, end = e, duration = e - b)
+            }
+            line.copy(words = kept.ifEmpty { null })
+        }
+        return out
+    }
+
+    /**
+     * 把每行的 [RichLyricLine.end] 钳到下一行 begin 之前（最后一行不动）。
+     *
+     * 新版 QQ 引擎给的 duration 会在行尾多留一截（表头行固定多 600ms，歌词行多 200~1700ms），
+     * 原样透传会让词幕 `TimingNavigator.hasOverlap` 为真，`forEachAt` 就会同时返回多行，
+     * `activeLines.size > 1` 之后 `LyricPlayerView` 的 YoYo 切行动画那一支永远进不去（退化成布局过渡）。
+     *
+     * 钳制不会改变"当前显示哪一行"（词幕 `forEachAtOrPrevious` 在空隙里仍保留上一行），
+     * 也不会影响间奏判定（`InterludeTracker` 只在 genuinely 有大间隙时才触发）。
+     */
     private fun clampOverlaps(lines: List<RichLyricLine>): List<RichLyricLine> {
         if (lines.size < 2) return lines
 
@@ -862,6 +1005,7 @@ object QQMusic : YukiBaseHooker() {
 
         return out
     }
+
 
     private fun sendSong(lyrics: List<RichLyricLine>) {
         if (currentSongId.isNullOrEmpty()) return
@@ -894,10 +1038,19 @@ object QQMusic : YukiBaseHooker() {
         return null
     }
 
-    // 读取引擎行对象里的逐字时间段，只取首尾时间，不下发逐字数据。
-    // 结构：起始ms / 时长ms / 文字，字与字首尾相接、绝对时间轴，末字结束正好是下一句开头，
-    // 所以它能给出这句真实的起唱和收尾时刻，而行对象上的 duration 只是"到下一句开始的时间"。
-    // 结构不符、时间不合法、或拼不回整行文本时返回 null，退回源码行为。
+    /**
+     * 读取引擎自带的逐字时间段，转成词幕的 [LyricWord]。
+     *
+     * 引擎行对象里有一串「逐字时间段」（字段结构：起始ms / 时长ms / 文字），
+     * 字符与字符首尾相接、绝对时间轴，末字的结束正好是下一句的开头，
+     * 也就是说它能准确回答"这句到底从哪一刻唱到哪一刻"，而行对象上的 duration 只是
+     * "到下一句开始的时间"（含停顿）。
+     *
+     * 返回值有两个用途：写进 [RichLyricLine.words] 交给词幕按字推进高亮，
+     * 同时给 [sungRanges] 记一份首字开始 / 末字结束。
+     *
+     * 结构不对、时间不合法、或拼不回整行文本时一律返回 null（宁可退回源码行为，也不改坏歌词）。
+     */
     private fun engineWords(line: Any, lineText: String): List<LyricWord>? {
         val list = findWordList(line) ?: return null
         val t = wordTimeFields ?: run {
@@ -921,7 +1074,7 @@ object QQMusic : YukiBaseHooker() {
             if (begin < 0 || dur <= 0) return null
             out.add(LyricWord(text = text, begin = begin, end = begin + dur, duration = dur))
         }
-        // 逐字文本必须能原样拼回整行，拼不回就当作没有逐字数据
+        // 逐字文本必须能原样拼回整行（词幕会用逐字重建文本，拼不回就不敢下发）
         if (out.joinToString("") { it.text.orEmpty() } != lineText) return null
         return out
     }
