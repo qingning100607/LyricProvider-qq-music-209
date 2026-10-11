@@ -47,7 +47,7 @@
 
 ## 构建
 
-```bash
+
 # 1. 克隆上游项目
 git clone https://github.com/tomakino/LyricProvider.git
 cd LyricProvider
@@ -59,11 +59,9 @@ rm -rf qq-music && cp -r /path/to/this-repo/qq-music ./
 ./gradlew :qq-music:assembleDebug
 
 
-
-
 ## 安装
 
-编译好的 APK 在 [Releases](https://github.com/qingning100607/LyricProvider-qq-music-209/releases)。
+ APK 在 [Releases](https://github.com/qingning100607/LyricProvider-qq-music-209/releases)。
 
 1. 安装 APK，在 LSPosed 里启用模块，作用域勾选 QQ 音乐（含 `:QQPlayerService`）。
 2. 强制停止 QQ 音乐后重新打开。
