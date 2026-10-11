@@ -58,11 +58,7 @@ rm -rf qq-music && cp -r /path/to/this-repo/qq-music ./
 # 3. debug
 ./gradlew :qq-music:assembleDebug
 
-# 4. release（需要自己的签名）
-export RELEASE_STORE_FILE=/path/to/your.jks
-export RELEASE_STORE_PASSWORD=xxx
-export RELEASE_KEY_ALIAS=xxx
-export RELEASE_KEY_PASSWORD=xxx
+# 4. release
 ./gradlew :qq-music:assembleRelease
 ```
 
