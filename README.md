@@ -58,6 +58,9 @@ rm -rf qq-music && cp -r /path/to/this-repo/qq-music ./
 # 3. debug
 ./gradlew :qq-music:assembleDebug
 
+
+
+
 ## 安装
 
 编译好的 APK 在 [Releases](https://github.com/qingning100607/LyricProvider-qq-music-209/releases)。
