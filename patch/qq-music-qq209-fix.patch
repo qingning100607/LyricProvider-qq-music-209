@@ -1,6 +1,14 @@
 --- a/src/main/kotlin/io/github/proify/lyricon/qmprovider/xposed/QQMusic.kt
 +++ b/src/main/kotlin/io/github/proify/lyricon/qmprovider/xposed/QQMusic.kt
-@@ -33,31 +33,96 @@
+@@ -10,6 +10,7 @@
+ import android.media.session.PlaybackState
+ import android.util.Log
+ import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
++import io.github.proify.lyricon.lyric.model.LyricWord
+ import io.github.proify.lyricon.lyric.model.RichLyricLine
+ import io.github.proify.lyricon.lyric.model.Song
+ import io.github.proify.lyricon.provider.LyriconFactory
+@@ -33,31 +34,92 @@
      
      private var lastLyricDataHash: Int = 0
      private var currentLyricsHash: Int = 0
@@ -8,12 +16,16 @@
      private var originalLyrics: List<RichLyricLine>? = null
      private var translationLyrics: List<RichLyricLine>? = null
 +
-+    /** 诊断用：本曲推送次数（词幕每次 setSong 都会 reset() 视图） */
++    // 引擎逐字时间里的真实唱段：key = 起始ms|文本 -> [首字起点, 末字终点]
++    private val sungRanges = HashMap<String, LongArray>()
++
++    // 高亮区间对齐后，行最多比第一个字提前显示的毫秒数
++    private val HEAD_LEAD_MS = 300L
 +
      
      private var isLyricClassHooked = false
 +
-+    /** 合并推送：短时间内多个文档各推一次会让词幕反复 reset() 视图，这里只推最后一次 */
++    // 合并推送：短时间内多个文档各推一次会让词幕反复 reset 视图，只推最后一次
 +    private val mergeLock = Any()
 +    @Volatile
 +    private var mergeVersion: Long = 0L
@@ -51,7 +63,7 @@
 +        return same.toDouble() / n >= 0.6
 +    }
 +
-+    /** 冷启动保险：容器类可能比 hook 时机更晚加载，轮询补 hook */
++    // 冷启动保险：容器类可能比 hook 时机更晚加载，轮询补 hook
 +    private fun startHookWatchdog() {
 +        Thread {
 +            val deadline = System.currentTimeMillis() + 60_000L
@@ -60,7 +72,6 @@
 +                try {
 +                    val clazz = "com.lyricengine.base.k".toClassOrNull(appClassLoader)
 +                    if (clazz != null) {
-+                        dlog("watchdog: 容器类已加载，补 hook")
 +                        hookAllConstructors(clazz)
 +                        if (isLyricClassHooked) return@Thread
 +                    }
@@ -80,18 +91,14 @@
      override fun onHook() {
 -        Log.i(TAG, "=== onHook called ===")
 -        Log.i(TAG, "processName: $processName")
-+        dlog("=== onHook called ===")
-+        dlog("processName: $processName")
- 
+-
          if (processName != PLAYER_SERVICE_PROCESS) {
 -            Log.i(TAG, "Skipping non-player process: $processName")
-+            dlog("Skipping non-player process: $processName")
              return
          }
  
 -        Log.i(TAG, "Hooking in QQPlayerService process")
-+        dlog("Hooking in QQPlayerService process")
- 
+-
          hookMediaSession()
          hookClassLoader()
 +        startHookWatchdog()
@@ -99,16 +106,14 @@
          onAppLifecycle {
              onCreate {
 -                Log.i(TAG, "App onCreate in QQPlayerService")
-+                dlog("App onCreate in QQPlayerService")
                  initProvider()
              }
          }
-@@ -78,14 +143,14 @@
+@@ -78,15 +140,12 @@
                  register()
                  player.setDisplayTranslation(true)
              }
 -            Log.i(TAG, "Provider initialized successfully")
-+            dlog("Provider initialized successfully")
          } catch (e: Exception) {
              Log.e(TAG, "initProvider failed: ${e.message}", e)
          }
@@ -116,210 +121,202 @@
  
      private fun hookClassLoader() {
 -        Log.i(TAG, "Hooking ClassLoader for dynamic class detection...")
-+        dlog("Hooking ClassLoader for dynamic class detection...")
-         
+-        
          try {
              val pathClassLoader = appClassLoader ?: return
-@@ -99,12 +164,12 @@
+             val classLoaderClass = pathClassLoader.javaClass
+@@ -99,12 +158,10 @@
                      val clazz = this.result as? Class<*> ?: return@after
                      
                      if (!isLyricClassHooked && isPotentialLyricDataClass(className, clazz)) {
 -                        Log.i(TAG, "Potential lyric data class detected: $className")
-+                        dlog("Potential lyric data class detected: $className")
                          tryHookLyricClass(clazz)
                      }
                  }
              }
 -            Log.i(TAG, "ClassLoader hooked successfully")
-+            dlog("ClassLoader hooked successfully")
          } catch (e: Exception) {
              Log.e(TAG, "Failed to hook ClassLoader: ${e.message}")
              fallbackHookKnownClasses()
-@@ -145,7 +210,7 @@
+@@ -145,8 +202,6 @@
          if (isLyricClassHooked) return
          
          try {
 -            Log.i(TAG, "Attempting to hook class: ${clazz.name}")
-+            dlog("Attempting to hook class: ${clazz.name}")
-             
+-            
              val linesField = findLinesField(clazz)
              if (linesField == null) {
-@@ -154,16 +219,16 @@
+                 Log.d(TAG, "No suitable lines field found in ${clazz.name}")
+@@ -154,16 +209,10 @@
              }
              
              detectedLinesFieldName = linesField.name
 -            Log.i(TAG, "Found lines field: ${linesField.name}")
-+            dlog("Found lines field: ${linesField.name}")
-             
+-            
              val constructors = clazz.declaredConstructors
 -            Log.i(TAG, "Found ${constructors.size} constructors")
-+            dlog("Found ${constructors.size} constructors")
-             
+-            
              constructors.forEach { constructor ->
 -                Log.i(TAG, "Hooking constructor: ${constructor.parameterTypes.map { it.name }}")
-+                dlog("Hooking constructor: ${constructor.parameterTypes.map { it.name }}")
                  constructor.hook {
                      after {
 -                        Log.i(TAG, "Constructor called for ${clazz.name}")
-+                        dlog("Constructor called for ${clazz.name}")
                          val instance = this.instance ?: return@after
                          extractLyricsDynamic(instance)
                      }
-@@ -173,7 +238,7 @@
+@@ -173,30 +222,21 @@
              hookLyricMethods(clazz)
              
              isLyricClassHooked = true
 -            Log.i(TAG, "Successfully hooked lyric class: ${clazz.name}")
-+            dlog("Successfully hooked lyric class: ${clazz.name}")
-             
+-            
          } catch (e: Exception) {
              Log.e(TAG, "Failed to hook lyric class ${clazz.name}: ${e.message}")
-@@ -181,22 +246,22 @@
+         }
      }
      
      private fun hookLyricMethods(clazz: Class<*>) {
 -        Log.i(TAG, "Looking for methods in ${clazz.name}")
-+        dlog("Looking for methods in ${clazz.name}")
-         
+-        
          val methods = clazz.declaredMethods
 -        Log.i(TAG, "Found ${methods.size} methods")
-+        dlog("Found ${methods.size} methods")
-         
+-        
          methods.take(20).forEach { method ->
              val methodName = method.name
              val paramCount = method.parameterCount
              
 -            Log.i(TAG, "Hooking method: $methodName with ${paramCount} params")
-+            dlog("Hooking method: $methodName with ${paramCount} params")
-             
+-            
              try {
                  method.hook {
                      after {
                          val instance = this.instance ?: return@after
 -                        Log.i(TAG, "Method $methodName called on ${clazz.name}")
-+                        dlog("Method $methodName called on ${clazz.name}")
                          extractLyricsDynamic(instance)
                      }
                  }
-@@ -218,16 +283,16 @@
+@@ -218,16 +258,12 @@
      }
  
      private fun extractLyricsDynamic(instance: Any) {
 -        Log.i(TAG, "extractLyricsDynamic called")
-+        dlog("extractLyricsDynamic called")
-         
+-        
          val hash = System.identityHashCode(instance)
          if (hash == lastLyricDataHash) {
 -            Log.i(TAG, "Same hash, skipping")
-+            dlog("Same hash, skipping")
              return
          }
          
          if (currentSongId == null) {
 -            Log.i(TAG, "No current song, skipping")
-+            dlog("No current song, skipping")
              return
          }
          
-@@ -243,7 +308,7 @@
+@@ -243,14 +279,12 @@
                  return
              }
              
 -            Log.i(TAG, "Found ${lines.size} lines for song: $currentSongTitle")
-+            dlog("Found ${lines.size} lines for song: $currentSongTitle")
-             
+-            
              val firstLine = lines.firstOrNull()
              if (firstLine == null) return
-@@ -288,7 +353,9 @@
+             
+             val lineClass = firstLine.javaClass
+             val lineFields = detectLineFields(lineClass)
+-            
++
+             val lyricLines = mutableListOf<RichLyricLine>()
+             
+             for ((index, line) in lines.withIndex()) {
+@@ -273,6 +307,10 @@
+                     } ?: 0L
+                     
+                     if (text.isNotBlank() && text != "//") {
++                        // 记下引擎逐字段的首尾，供高亮区间对齐用（逐字数据不下发）
++                        engineWords(line, text)?.let { words ->
++                            sungRanges[sungKey(startTime, text)] = longArrayOf(words.first().begin, words.last().end)
++                        }
+                         lyricLines.add(RichLyricLine(
+                             begin = startTime,
+                             end = startTime + duration,
+@@ -288,7 +326,8 @@
              
              if (lyricLines.isNotEmpty()) {
                  lastLyricDataHash = hash
 -                processLyrics(lyricLines)
 +                val meta = containerMeta(instance)
-+                dlog("容器元数据: 歌名=${meta[0]}, 歌手=${meta[1]}")
 +                processLyrics(lyricLines, meta)
              }
          } catch (e: Exception) {
              Log.e(TAG, "Failed to extract lyrics: ${e.message}")
-@@ -326,20 +393,21 @@
+@@ -326,20 +365,17 @@
              fields["duration"] = numberFields[1]
          }
          
 -        Log.i(TAG, "Detected line fields: text=${fields["text"]?.name}, startTime=${fields["startTime"]?.name}, duration=${fields["duration"]?.name}")
-+        dlog("Detected line fields: text=${fields["text"]?.name}, startTime=${fields["startTime"]?.name}, duration=${fields["duration"]?.name}")
-         
+-        
          detectedLineClassFields = fields
          return fields
      }
  
      private fun fallbackHookKnownClasses() {
 -        Log.i(TAG, "Falling back to known class names...")
-+        dlog("Falling back to known class names...")
-         
+-        
          val knownClassPatterns = mutableListOf<String>()
          
 -        for (i in 'a'..'z') {
 -            knownClassPatterns.add("com.lyricengine.base.$i")
 -        }
-+        // ===== 唯一的适配改动：新引擎（QQ音乐 20.9.0.8）的歌词容器类 =====
-+        // 旧版是按 a~z 暴力扫"名字里带 lyric 且有 List 字段"的类，会 hook 错类；
-+        // 新版确定性类名是 com.lyricengine.base.k（字段 e = CopyOnWriteArrayList，行对象 t）
++        // ===== 新版引擎（QQ 音乐 20.9.0.8）的歌词容器类 =====
++        // 旧版按 a~z 扫"名字带 lyric 且有 List 字段"的类，会 hook 错类；
++        // 新版类名确定：com.lyricengine.base.k（字段 e = CopyOnWriteArrayList，行对象 t）
 +        knownClassPatterns.add("com.lyricengine.base.k")
          knownClassPatterns.addAll(listOf(
              "com.tencent.qqmusic.common.utils.lyric.f",
              "com.tencent.qqmusic.common.utils.lyric.e",
-@@ -351,15 +419,15 @@
+@@ -351,15 +387,11 @@
              try {
                  val clazz = className.toClassOrNull(appClassLoader)
                  if (clazz != null) {
 -                    Log.i(TAG, "Found class: $className")
 -                    Log.i(TAG, "Class fields: ${clazz.declaredFields.map { "${it.name}:${it.type.simpleName}" }}")
-+                    dlog("Found class: $className")
-+                    dlog("Class fields: ${clazz.declaredFields.map { "${it.name}:${it.type.simpleName}" }}")
-                     
+-                    
                      val hasListField = clazz.declaredFields.any { field ->
                          java.util.List::class.java.isAssignableFrom(field.type)
                      }
                      
                      if (hasListField) {
 -                        Log.i(TAG, "Class has List field, hooking all constructors")
-+                        dlog("Class has List field, hooking all constructors")
                          hookAllConstructors(clazz)
                      }
                  }
-@@ -377,13 +445,13 @@
+@@ -377,13 +409,9 @@
              if (linesField == null) return
              
              detectedLinesFieldName = linesField.name
 -            Log.i(TAG, "Hooking ${clazz.name}, lines field: ${linesField.name}")
-+            dlog("Hooking ${clazz.name}, lines field: ${linesField.name}")
-             
+-            
              clazz.declaredConstructors.forEach { constructor ->
 -                Log.i(TAG, "Hooking constructor: ${constructor.parameterTypes.map { it.name }}")
-+                dlog("Hooking constructor: ${constructor.parameterTypes.map { it.name }}")
                  constructor.hook {
                      after {
 -                        Log.i(TAG, "Constructor called for ${clazz.name}")
-+                        dlog("Constructor called for ${clazz.name}")
                          val instance = this.instance ?: return@after
                          
                          Thread {
-@@ -395,12 +463,51 @@
+@@ -395,12 +423,48 @@
              }
              
              isLyricClassHooked = true
 -            Log.i(TAG, "Successfully hooked lyric class: ${clazz.name}")
-+            dlog("Successfully hooked lyric class: ${clazz.name}")
          } catch (e: Exception) {
              Log.e(TAG, "Failed to hook ${clazz.name}: ${e.message}")
          }
      }
      
-+    // ===== 唯一新增的判定 =====
-+    // 引擎内存里同时存在多首歌的歌词容器（上一首/下一首的残留），而源码里
-+    // “第一个到的算原文、第二个到的算翻译”分不出容器属于谁 —— 别人的歌词就会进翻译位。
-+    // 容器本身自带歌名/歌手字段（引擎自己判“首行是不是头部行”用的就是它），
-+    // 这里只用它做一件事：不是当前播放的歌 -> 丢弃。
++    // 引擎内存里同时存在多首歌的歌词容器（上一首/下一首的残留），而源码只按"第一个到的算
++    // 原文、第二个到的算翻译"来区分，分不出容器属于谁，别人的歌词就会进翻译位。
++    // 容器自带歌名/歌手字段，这里只用它做一件事：不是当前播放的歌就丢弃。
 +    private var containerStringFields: List<java.lang.reflect.Field>? = null
 +
 +    private fun containerMeta(instance: Any): Array<String?> {
@@ -357,21 +354,15 @@
      private fun isInstrumentalPlaceholder(lyrics: List<RichLyricLine>): Boolean {
          if (lyrics.size > 3) return false
          val text = lyrics.joinToString("") { it.text ?: "" }
-@@ -410,16 +517,84 @@
+@@ -410,16 +474,89 @@
                 text.contains("Instrumental")
      }
      
 -    private fun processLyrics(lyrics: List<RichLyricLine>) {
-+    /**
-+     * 翻译候选的首行是不是「别的歌」的表头。
-+     *
-+     * QQ 会把「下一首」的歌词文档预载进内存，而下一首常常是**同一位歌手的另一首**，
-+     * 元数据里的歌手能对上 —— 光靠 isCurrentSong 拦不住（歌手旁路不能删，否则
-+     * 「爱情魔法！」vs「爱的魔法」这类歌名有出入的本歌容器会被误杀）。
-+     *
-+     * 这里只用一个特征：首行形如「歌名 - 歌手」，且连字符前面那截歌名跟当前歌名对不上 → 别的歌。
-+     * 本歌的翻译容器首行一般是「QQ音乐享有本翻译作品的著作权」之类，或本歌自己的表头（歌名能对上），都不会命中。
-+     */
++    // 翻译候选的首行是不是别的歌的表头。
++    // QQ 会预载下一首的歌词文档，下一首常常是同一位歌手的另一首，歌手元数据对得上，
++    // 所以还要看首行：形如「歌名 - 歌手」且歌名跟当前歌对不上的，当成别的歌丢掉。
++    // 本歌的翻译容器首行是版权声明或对得上的表头，不会命中。
 +    private fun looksLikeOtherSongHeader(lyrics: List<RichLyricLine>): Boolean {
 +        val first = lyrics.firstOrNull()?.text?.trim() ?: return false
 +        // 「 - 」这种带空格的才是表头样式，歌名里带连字符的不会被误判
@@ -395,19 +386,14 @@
 +        return a.isNotEmpty() && b.isNotEmpty() && (a.contains(b) || b.contains(a))
 +    }
 +
-+    /**
-+     * 翻译候选的元数据能不能信：
-+     * - 有歌名 → 信（入口 isCurrentSong 已经核过一遍）
-+     * - 没歌名但有歌手且歌手就是当前歌 → 信（本歌自己缺歌名的翻译轨，如 Sacred Play Secret Place）
-+     * - 歌名歌手都空 / 歌手对不上 → 基本是 QQ 预载的别的歌，不信
-+     */
++    // 翻译候选的元数据能不能信：有歌名就信（入口已经核过一遍）；
++    // 没歌名但歌手是当前歌也信（本歌缺歌名的翻译轨）；
++    // 歌名歌手都空、或歌手对不上，基本都是预载的别的歌，不信。
 +    private fun translationMetaOk(meta: Array<String?>): Boolean =
 +        !meta.getOrNull(0).isNullOrBlank() || sameArtist(meta.getOrNull(1))
 +
-+    /**
-+     * 整轨几乎只有拉丁字母 → 罗马音轨（QQ 的日文歌常同时给"中文翻译轨 + 罗马音轨"）。
-+     * 用途：翻译位先被罗马音占了也不怕，后面来了中文轨就替换它。
-+     */
++    // 整轨几乎只有拉丁字母就是罗马音轨（日文歌常同时给中文轨和罗马音轨）。
++    // 翻译位先被罗马音占了也没关系，后面来了中文轨可以替换它。
 +    private fun isRomaLike(lyrics: List<RichLyricLine>): Boolean {
 +        val text = lyrics.joinToString("") { it.text ?: "" }
 +        var letters = 0
@@ -420,10 +406,32 @@
 +        return letters >= 10 && cjk * 5 < letters
 +    }
 +
++    // 文档开头的词曲/制作人员行标签（词：、曲：、Lyrics by：、Composed by： …）。
++    // 这些行照常显示，只是不参与翻译配对。
++    private val CREDIT_LABELS = listOf(
++        "lyrics by", "composed by", "produced by", "published by", "vocals by",
++        "background vocals", "co-producer", "mixing engineer", "mastering engineer",
++        "recorded at", "repertoire owner", "written by", "arranged by", "music by",
++        // 中文标签一律连冒号一起匹配：不然"你为我作曲"这类歌词正文会被误杀
++        "词：", "曲：", "编曲：", "作词：", "作曲：", "制作人：", "混音：", "母带：", "录音：", "出品：", "监制："
++    )
++
++    // 不参与翻译配对的行：文档表头（歌名 - 歌手），以及词曲/制作人员行。
++    // 它们都挤在文档开头，跟第一句歌词只差一两百毫秒，参与配对会抢走第一句的翻译。
++    private fun isCreditOrHeaderLine(line: RichLyricLine, docFirstLine: String?): Boolean {
++        val t = line.text?.trim() ?: return true
++        if (t.isEmpty()) return true
++        // 半角冒号归一化，免得"作词:李荣浩"漏掉
++        val lower = t.lowercase().replace(':', '：')
++        // 这些行都写在行首，所以只认行首，免得歌词里出现"作曲"之类的词被误判
++        if (CREDIT_LABELS.any { lower.startsWith(it) }) return true
++        // 表头只可能是文档第一行，且形如「歌名 - 歌手」（连字符前后带空格）
++        return t == docFirstLine?.trim() && Regex("\\s[-–—]\\s?").containsMatchIn(t)
++    }
++
 +    private fun processLyrics(lyrics: List<RichLyricLine>, meta: Array<String?>) {
 +        // 不是本歌的容器（别的歌的残留）直接丢弃
 +        if (!isCurrentSong(meta)) {
-+            dlog("丢弃非本歌容器: 歌名=${meta[0]}, 歌手=${meta[1]}")
 +            return
 +        }
 +
@@ -433,21 +441,16 @@
 -        Log.i(TAG, "Processing ${lyrics.size} lines, lastLineEnd=$lastLineEnd")
 -        Log.i(TAG, "First line: $firstLine")
 -        Log.i(TAG, "Current song title: $currentSongTitle")
-+        dlog("Processing ${lyrics.size} lines, lastLineEnd=$lastLineEnd")
-+        dlog("First line: $firstLine")
-+        dlog("Current song title: $currentSongTitle")
-         
+-        
          if (isInstrumentalPlaceholder(lyrics)) {
 -            Log.i(TAG, "Instrumental placeholder detected, clearing all lyrics")
 +            if (originalLyrics != null || currentLyricsHash != 0) {
-+                dlog("已有正文歌词，忽略纯音乐占位")
 +                return
 +            }
-+            dlog("Instrumental placeholder detected, clearing all lyrics")
              originalLyrics = null
              translationLyrics = null
              lastLyricDataHash = 0
-@@ -431,31 +606,68 @@
+@@ -431,31 +568,54 @@
              val titleWords = currentSongTitle.split(" ", "(", "（", "-", "～", "~", "[", "【")
                  .filter { it.isNotBlank() && it.length >= 2 }
              
@@ -460,27 +463,22 @@
              }
              
 -            Log.i(TAG, "Matches current song: $matchesCurrentSong")
-+            dlog("Matches current song: $matchesCurrentSong")
-             
+-            
 -            if (!matchesCurrentSong && lyrics.size > 5) {
 -                Log.i(TAG, "Lyrics don't match current song, skipping")
 +            // 歌名主体命中（去标点后包含）也算本歌
 +            val matchesByTitleKey = titleKey.isNotEmpty() &&
 +                    (normalizeForCompare(firstLine).contains(titleKey) ||
 +                            lyrics.any { normalizeForCompare(it.text).contains(titleKey) })
-+            if (titleKey.isNotEmpty()) dlog("歌名主体比对: key=$titleKey 命中=$matchesByTitleKey")
-+
 +            if (!matchesCurrentSong && !matchesByTitleKey && lyrics.size > 5) {
-+                // 不是本歌的原文 —— 但可能是"先到的翻译轨"（QQ 的轨顺序不固定，实测
-+                // 《ありがとう…》的中文轨比日文原文先到）。带本歌元数据的就挂到翻译位，别浪费。
++                // 不是本歌的原文：可能是先到的翻译轨（两条轨的先后顺序不固定）。
++                // 带本歌元数据的就挂到翻译位，别浪费。
 +                if (translationLyrics == null && translationMetaOk(meta) &&
-+                    !isDuplicateOf(null, lyrics) && !looksLikeOtherSongHeader(lyrics)
++                    !looksLikeOtherSongHeader(lyrics)
 +                ) {
 +                    translationLyrics = lyrics
-+                    dlog("非原文轨（疑似先到的翻译），改挂翻译位")
 +                    scheduleMerge()
 +                } else {
-+                    dlog("Lyrics don't match current song, skipping")
 +                }
                  return
              }
@@ -488,35 +486,27 @@
              originalLyrics = lyrics
 -            Log.i(TAG, "Stored as original")
 -        } else if (translationLyrics == null) {
-+            dlog("Stored as original")
 +        } else if (translationLyrics == null || isRomaLike(translationLyrics!!)) {
 +            if (isDuplicateOf(originalLyrics, lyrics)) {
-+                dlog("翻译候选与原文内容重合（重复轨），跳过")
 +                return
 +            }
 +            // 歌名为空、歌手也对不上 → 基本都是 QQ 预载的「别的歌」；
 +            // 但歌名为空、歌手就是当前歌 → 是本歌自己缺了歌名的翻译轨（如 Sacred Play Secret Place）
 +            if (!translationMetaOk(meta)) {
-+                dlog("翻译候选无歌名且歌手对不上（疑似别的歌的预载），跳过")
 +                return
 +            }
 +            // 歌手对得上也可能放进同一位歌手的另一首（QQ 会预载下一首），再看一眼首行
 +            if (looksLikeOtherSongHeader(lyrics)) {
-+                dlog("翻译候选首行像别的歌的表头: $firstLine，跳过")
 +                return
 +            }
 +            // 已经是罗马音轨时，别让另一条罗马音轨顶替；只有中文轨才值得替换
 +            if (translationLyrics != null && isRomaLike(lyrics)) {
-+                dlog("已有罗马音轨，罗马音不顶替")
 +                return
 +            }
-+            if (translationLyrics != null) dlog("中文轨替换掉已有的罗马音轨")
              translationLyrics = lyrics
 -            Log.i(TAG, "Stored as translation")
-+            dlog("Stored as translation")
          } else {
 -            Log.i(TAG, "Already have both, skipping")
-+            dlog("Already have both, skipping")
          }
          
 -        Thread {
@@ -527,59 +517,74 @@
      }
      
      private fun sendEmptyLyrics() {
-@@ -470,14 +682,18 @@
+@@ -470,14 +630,15 @@
          )
          
          provider?.player?.setSong(song)
 -        Log.i(TAG, "Sent empty lyrics for instrumental song")
-+        dlog("Sent empty lyrics for instrumental song")
      }
      
      private fun mergeAndSendLyrics() {
          val original = originalLyrics
 -        val translation = translationLyrics
+-        
+-        Log.i(TAG, "mergeAndSendLyrics: original=${original?.size}, translation=${translation?.size}")
 +        // 去掉“著作权声明/来源说明”行，避免被配到开头几行
 +        val translation = translationLyrics?.filterNot { line ->
 +            val t = line.text
 +            t != null && NOTICE_KEYWORDS.any { t.contains(it) }
 +        }
          
--        Log.i(TAG, "mergeAndSendLyrics: original=${original?.size}, translation=${translation?.size}")
-+        dlog("mergeAndSendLyrics: original=${original?.size}, translation=${translation?.size}")
-         
          if (original == null && translation == null) {
              return
-@@ -494,24 +710,41 @@
+@@ -494,24 +655,54 @@
          }
          
          val merged = mutableListOf<RichLyricLine>()
 -        
-+
-+        // 每一条翻译只配一次：取 ±2 秒内“最近”的那条原文行
-+        // （源码原本是 find 取第一条，同一条翻译会被重复配到前面好几行，连歌名/词曲行也会带上）
-+        val usedTrans = HashSet<Int>()
-+        val transList = translation!!
-+
-         for (origLine in original!!) {
+-        for (origLine in original!!) {
 -            val transLine = translation!!.find { trans ->
 -                kotlin.math.abs(trans.begin - origLine.begin) < 2000
-+            var bestIndex = -1
-+            var bestDelta = Long.MAX_VALUE
-+            for ((i, trans) in transList.withIndex()) {
-+                if (i in usedTrans) continue
-+                val delta = kotlin.math.abs(trans.begin - origLine.begin)
-+                if (delta < 2000L && delta < bestDelta) {
-+                    bestDelta = delta
-+                    bestIndex = i
++
++        // 原文轨和翻译轨是逐行对应的两条时间轴，按顺序一对一配。
++        // 源码那种"每条原文取 ±2 秒内第一条翻译"的写法，会被表头和词曲/制作人员行抢走
++        // 第一句的翻译；反过来"每条翻译取最近原文行"又会在翻译轨整体晚一秒多时把翻译
++        // 吸到后一句上。所以先剔掉不参与配对的行，再按顺序对齐，只接受时间相近（<2 秒）的一对。
++        val transList = translation!!
++        val transDocFirst = transList.minByOrNull { it.begin }?.text
++        // 翻译轨同样可能带表头/制作人员行，它们也不参与配对，否则会把整条轨顶得错位一格
++        val transLyrics = transList.filterNot { isCreditOrHeaderLine(it, transDocFirst) }
++        val assignedTrans = HashMap<Int, String>()   // 原文行下标 -> 翻译文本
++        val origSortedIdx = original!!.indices.sortedBy { original!![it].begin }
++        val docFirstLine = original!!.getOrNull(origSortedIdx.firstOrNull() ?: 0)?.text
++        val lyricIdx = origSortedIdx.filterNot { isCreditOrHeaderLine(original!![it], docFirstLine) }
++        val transSorted = transLyrics.sortedBy { it.begin }
++        var li = 0
++        for (trans in transSorted) {
++            // 越过时间上明显更早、又没等到翻译的歌词行
++            while (li < lyricIdx.size && original!![lyricIdx[li]].begin < trans.begin - 2000) li++
++            // 按顺序取第一条时间相近的歌词行；当前这条超出窗口时，允许往后跳 1 行
++            var pick = -1
++            var probe = li
++            while (probe < lyricIdx.size && probe <= li + 1) {
++                if (kotlin.math.abs(trans.begin - original!![lyricIdx[probe]].begin) < 2000) {
++                    pick = probe
++                    break
 +                }
++                probe++
              }
 -            
-+
-+            val transText = if (bestIndex >= 0) {
-+                usedTrans.add(bestIndex)
-+                transList[bestIndex].text
-+            } else null
-+
++            if (pick >= 0) {
++                val oIdx = lyricIdx[pick]
++                val origLine = original!![oIdx]
++                val text = trans.text
++                if (text != null && text != origLine.text && text != "//" && text.isNotBlank()) {
++                    assignedTrans[oIdx] = text
++                }
++                li = pick + 1
++            }
++        }
++        original!!.forEachIndexed { i, origLine ->
              merged.add(RichLyricLine(
                  begin = origLine.begin,
                  end = origLine.end,
@@ -587,36 +592,33 @@
                  text = origLine.text,
 -                translation = transLine?.text?.takeIf { 
 -                    it != origLine.text && it != "//" && it.isNotBlank() 
-+                translation = transText?.takeIf {
-+                    it != origLine.text && it != "//" && it.isNotBlank()
-                 }
+-                }
++                translation = assignedTrans[i]
              ))
          }
-         
+-        
 -        Log.i(TAG, "Merged ${merged.size} lines")
-+        dlog("Merged ${merged.size} lines")
++
          sendLyrics(merged)
      }
  
-@@ -528,7 +761,7 @@
+@@ -528,7 +719,6 @@
                              handleMetadataChange(metadata)
                          }
                      }
 -                    Log.i(TAG, "Hooked setMetadata")
-+                    dlog("Hooked setMetadata")
                  }
  
                  if (method.name == "setPlaybackState" && method.parameterCount == 1) {
-@@ -538,7 +771,7 @@
+@@ -538,7 +728,6 @@
                              provider?.player?.setPlaybackState(state)
                          }
                      }
 -                    Log.i(TAG, "Hooked setPlaybackState")
-+                    dlog("Hooked setPlaybackState")
                  }
              }
          }.onFailure { e ->
-@@ -566,48 +799,102 @@
+@@ -566,45 +755,114 @@
          currentSongArtist = artist
          currentSongDuration = duration
  
@@ -625,27 +627,21 @@
 -        Log.i(TAG, "Artist: $artist")
 -        Log.i(TAG, "Duration: $duration")
 -
-+        dlog("=== New song ===")
-+        dlog("Title: $rawTitle")
-+        dlog("Artist: $artist")
-+        dlog("Duration: $duration")
          lastLyricDataHash = 0
          currentLyricsHash = 0
          originalLyrics = null
          translationLyrics = null
-         
-+        
+-        
++        sungRanges.clear()
          val cached = QQLyricsCache.get(songId)
          if (cached != null) {
 -            Log.i(TAG, "Using cached lyrics")
-+            dlog("Using cached lyrics")
              currentLyricsHash = cached.hashCode()
              sendSong(cached)
          }
 +
-+        // 迟到清屏：换歌后 6 秒还没拿到本曲任何歌词（有些歌 QQ 就是没词），
-+        // 就推一首空歌词，免得词幕一直挂着上一首的歌词在走。
-+        // 只在本曲一次都没推过时才推空；之后真歌词到了照样能推上去（currentLyricsHash 还是 0）。
++        // 换歌后 6 秒还没拿到本曲任何歌词（有些歌 QQ 就是没词），推一次空歌词清屏，
++        // 免得词幕一直挂着上一首在走。只在本曲一次都没推过时执行，之后真歌词到了照常推送。
 +        Thread {
 +            try {
 +                Thread.sleep(6000)
@@ -655,7 +651,6 @@
 +            if (songId == currentSongId && originalLyrics == null && translationLyrics == null &&
 +                currentLyricsHash == 0
 +            ) {
-+                dlog("本曲 6 秒内没有歌词，推空歌词清屏")
 +                sendEmptyLyrics()
 +            }
 +        }.start()
@@ -663,9 +658,9 @@
  
      private fun sendLyrics(lyrics: List<RichLyricLine>) {
 -        val hash = lyrics.hashCode()
-+        // 新版 QQ 引擎的行尾会越界到下一行，这里钳一下（见 clampOverlaps 注释）
-+        val fixed = clampOverlaps(lyrics)
-+        val hash = fixed.hashCode()
++        // 引擎行尾会越界到下一行，先钳一下（见 clampOverlaps）
++        val aligned = alignHighlightSpan(clampOverlaps(lyrics))
++        val hash = aligned.hashCode()
          if (hash == currentLyricsHash) {
              return
          }
@@ -678,8 +673,8 @@
          currentLyricsHash = hash
 -        QQLyricsCache.put(currentSongId!!, lyrics)
 -        sendSong(lyrics)
-+        QQLyricsCache.put(currentSongId!!, fixed)
-+        sendSong(fixed)
++        QQLyricsCache.put(currentSongId!!, aligned)
++        sendSong(aligned)
 +
 +    }
  
@@ -687,16 +682,42 @@
 -        lyrics.take(5).forEach { line ->
 -            val trans = line.translation?.let { " [$it]" } ?: ""
 -            Log.i(TAG, "[${line.begin}] ${line.text}$trans")
-+    /**
-+     * 把每行的 [RichLyricLine.end] 钳到下一行 begin 之前（最后一行不动）。
-+     *
-+     * 新版 QQ 引擎给的 duration 会在行尾多留一截（实测：表头行固定 +600ms，歌词行 +200~1700ms），
-+     * 原样透传会让词幕 `TimingNavigator.hasOverlap` 为真 → `forEachAt` 同时返回多行 →
-+     * `activeLines.size > 1` → `LyricPlayerView` 的 YoYo 切行动画那一支永远进不去（退化成布局过渡）。
-+     *
-+     * 钳制不会改变"当前显示哪一行"（词幕 `forEachAtOrPrevious` 在空隙里仍保留上一行），
-+     * 也不会影响间奏判定（`InterludeTracker` 只在 genuinely 有大间隙时才触发）。
-+     */
++    private fun sungKey(begin: Long, text: String?): String = "$begin|${text.orEmpty()}"
++
++    // 把高亮扫描区间收窄到这句真正唱的那一段。
++    //
++    // 没有逐词数据时，词幕会把整行当成一个词、按 duration 匀速扫完；而 QQ 的行 duration
++    // 是"到下一句开始的时间"，含句间停顿（有的行窗口二十多秒，实际只唱一秒），
++    // 于是高亮越到句尾越落后于人声。这里按引擎逐字段把区间收到真实唱段上：
++    // duration = 从显示起点扫到末字结束；begin 最多比首字提前 HEAD_LEAD_MS 显示。
++    // end 不动，所以行的显示时长和间奏判定不受影响；begin 变晚会让这一行比原来晚一点出现，
++    // 在它出现之前词幕仍然显示上一行。
++    // 逐字数据缺失或算出来不合理时原样返回。
++    private fun alignHighlightSpan(lines: List<RichLyricLine>): List<RichLyricLine> {
++        if (sungRanges.isEmpty()) return lines
++        var n = 0
++        val out = lines.map { line ->
++            val range = sungRanges[sungKey(line.begin, line.text)] ?: return@map line
++            val sungBegin = range[0]
++            val sungEnd = range[1]
++            // 行首最多提前 HEAD_LEAD_MS 显示，且必须严格小于 end（相等会被词幕丢掉）
++            var newBegin = maxOf(line.begin, sungBegin - HEAD_LEAD_MS)
++            if (newBegin >= line.end) newBegin = line.end - 1
++            val newDuration = sungEnd - newBegin
++            // 只在"确实更短、且落在一行之内"时才改
++            if (newDuration <= 0 || newDuration >= line.duration || sungEnd > line.end + 1) return@map line
++            if (newBegin == line.begin && newDuration == line.duration) return@map line
++            n++
++            line.copy(begin = newBegin, duration = newDuration)
++        }
++        val noWord = lines.count { sungRanges[sungKey(it.begin, it.text)] == null }
++        return out
++    }
++
++    // 把每行的 end 钳到下一行 begin 之前（最后一行不动）。
++    // 引擎给的 duration 会在行尾多留一截（表头 +600ms，歌词行 +200~1700ms），原样透传
++    // 会让相邻行时间轴重叠，词幕据此认为"同时有多行活跃"，切行动画就走不到。
++    // 钳制不改变当前显示哪一行（空隙里词幕仍保留上一行），也不影响间奏判定。
 +    private fun clampOverlaps(lines: List<RichLyricLine>): List<RichLyricLine> {
 +        if (lines.size < 2) return lines
 +
@@ -721,55 +742,65 @@
 +            out.add(cur)
          }
 +
-+        if (clamped > 0) dlog("诊断[钳制]: ${lines.size} 行里钳了 $clamped 行的 end")
 +        return out
      }
+-    
 +
-     
      private fun sendSong(lyrics: List<RichLyricLine>) {
          if (currentSongId.isNullOrEmpty()) return
  
-+
-         val song = Song(
-             id = currentSongId!!,
-             name = currentSongTitle,
-@@ -618,4 +905,15 @@
+@@ -618,4 +876,54 @@
  
          provider?.player?.setSong(song)
      }
 +
-+    /**
-+     * 日志开关：用户担心磁盘写入影响性能，已改成空实现（零 I/O）。
-+     * 调用点全部保留，要排查问题时把实现换回下面两行即可：
-+     *   Log.i(TAG, msg)
-+     *   File("/data/data/com.tencent.qqmusic/files/lyricon_debug.log").appendText(...)
-+     * （带日志的完整版本另存了一份：/sdcard/Download/qq-music-src/QQMusic-withlogs.kt）
-+     */
-+    @Suppress("UNUSED_PARAMETER")
-+    private fun dlog(msg: String) {
++    /** 引擎「行对象」里逐字时间段字段的反射句柄（begin/duration/text），首次用到时探测 */
++    private var wordTimeFields: Triple<Field, Field, Field>? = null
++
++    /** 找出这一行的逐字列表（行对象里第一个非空的 List/Collection 字段） */
++    private fun findWordList(line: Any): List<*>? {
++        for (f in line.javaClass.declaredFields) {
++            if (!Collection::class.java.isAssignableFrom(f.type)) continue
++            val v = runCatching {
++                f.isAccessible = true
++                f.get(line) as? Collection<*>
++            }.getOrNull() ?: continue
++            if (v.isEmpty()) continue
++            return v.toList()
++        }
++        return null
 +    }
++
++    // 读取引擎行对象里的逐字时间段，只取首尾时间，不下发逐字数据。
++    // 结构：起始ms / 时长ms / 文字，字与字首尾相接、绝对时间轴，末字结束正好是下一句开头，
++    // 所以它能给出这句真实的起唱和收尾时刻，而行对象上的 duration 只是"到下一句开始的时间"。
++    // 结构不符、时间不合法、或拼不回整行文本时返回 null，退回源码行为。
++    private fun engineWords(line: Any, lineText: String): List<LyricWord>? {
++        val list = findWordList(line) ?: return null
++        val t = wordTimeFields ?: run {
++            val cls = list.firstOrNull()?.javaClass ?: return null
++            val textField = cls.declaredFields.firstOrNull { it.type == String::class.java } ?: return null
++            val numberFields = cls.declaredFields.filter {
++                it.type == java.lang.Long::class.java || it.type == java.lang.Long.TYPE ||
++                    it.type == java.lang.Integer::class.java || it.type == java.lang.Integer.TYPE
++            }
++            if (numberFields.size < 2) return null
++            Triple(numberFields[0], numberFields[1], textField).also {
++                wordTimeFields = it
++            }
++        }
++        val out = ArrayList<LyricWord>(list.size)
++        for (el in list) {
++            if (el == null) return null
++            val begin = runCatching { t.first.isAccessible = true; (t.first.get(el) as? Number)?.toLong() }.getOrNull() ?: return null
++            val dur = runCatching { t.second.isAccessible = true; (t.second.get(el) as? Number)?.toLong() }.getOrNull() ?: return null
++            val text = runCatching { t.third.isAccessible = true; t.third.get(el) as? String }.getOrNull() ?: return null
++            if (begin < 0 || dur <= 0) return null
++            out.add(LyricWord(text = text, begin = begin, end = begin + dur, duration = dur))
++        }
++        // 逐字文本必须能原样拼回整行，拼不回就当作没有逐字数据
++        if (out.joinToString("") { it.text.orEmpty() } != lineText) return null
++        return out
++    }
++
  }
---- a/src/main/kotlin/io/github/proify/lyricon/qmprovider/xposed/HookEntry.kt
-+++ b/src/main/kotlin/io/github/proify/lyricon/qmprovider/xposed/HookEntry.kt
-@@ -10,12 +10,12 @@
- import com.highcapable.yukihookapi.annotation.xposed.InjectYukiHookWithXposed
- import com.highcapable.yukihookapi.hook.xposed.proxy.IYukiHookXposedInit
- 
--@InjectYukiHookWithXposed(modulePackageName = "io.github.proify.lyricon.qmprovider")
-+@InjectYukiHookWithXposed(modulePackageName = Constants.PROVIDER_PACKAGE_NAME)
- open class HookEntry : IYukiHookXposedInit {
- 
-     override fun onHook() {
-         YukiHookAPI.encase {
--            loadApp(Constants.QQ_MUSIC_PACKAGE, QQMusic)
-+            loadApp(Constants.MUSIC_PACKAGE_NAME, QQMusic)
-         }
-     }
- 
-@@ -27,4 +27,4 @@
-             }
-         }
-     }
--}
-+}
-\ No newline at end of file
