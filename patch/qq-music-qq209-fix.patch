@@ -1,6 +1,6 @@
 --- a/src/main/kotlin/io/github/proify/lyricon/qmprovider/xposed/QQMusic.kt
 +++ b/src/main/kotlin/io/github/proify/lyricon/qmprovider/xposed/QQMusic.kt
-@@ -33,31 +33,97 @@
+@@ -33,31 +33,96 @@
      
      private var lastLyricDataHash: Int = 0
      private var currentLyricsHash: Int = 0
@@ -34,8 +34,7 @@
 +
 +    /** 版权声明/来源说明行：不该出现在翻译位 */
 +    private val NOTICE_KEYWORDS = listOf(
-+        "享有本翻译作品的著作权", "本翻译作品", "歌词贡献者", "翻译贡献者",
-+        "由AI生成", "由文曲", "由AI工具", "以下为AI"
++        "享有本翻译作品的著作权", "本翻译作品", "歌词贡献者", "翻译贡献者"
 +    )
 +
 +    /** 与原文内容高度重合（≥60% 行相同）= 同一首歌的重复轨，不是翻译 */
@@ -104,7 +103,7 @@
                  initProvider()
              }
          }
-@@ -78,14 +144,14 @@
+@@ -78,14 +143,14 @@
                  register()
                  player.setDisplayTranslation(true)
              }
@@ -121,7 +120,7 @@
          
          try {
              val pathClassLoader = appClassLoader ?: return
-@@ -99,12 +165,12 @@
+@@ -99,12 +164,12 @@
                      val clazz = this.result as? Class<*> ?: return@after
                      
                      if (!isLyricClassHooked && isPotentialLyricDataClass(className, clazz)) {
@@ -136,7 +135,7 @@
          } catch (e: Exception) {
              Log.e(TAG, "Failed to hook ClassLoader: ${e.message}")
              fallbackHookKnownClasses()
-@@ -145,7 +211,7 @@
+@@ -145,7 +210,7 @@
          if (isLyricClassHooked) return
          
          try {
@@ -145,7 +144,7 @@
              
              val linesField = findLinesField(clazz)
              if (linesField == null) {
-@@ -154,16 +220,16 @@
+@@ -154,16 +219,16 @@
              }
              
              detectedLinesFieldName = linesField.name
@@ -166,7 +165,7 @@
                          val instance = this.instance ?: return@after
                          extractLyricsDynamic(instance)
                      }
-@@ -173,7 +239,7 @@
+@@ -173,7 +238,7 @@
              hookLyricMethods(clazz)
              
              isLyricClassHooked = true
@@ -175,7 +174,7 @@
              
          } catch (e: Exception) {
              Log.e(TAG, "Failed to hook lyric class ${clazz.name}: ${e.message}")
-@@ -181,22 +247,22 @@
+@@ -181,22 +246,22 @@
      }
      
      private fun hookLyricMethods(clazz: Class<*>) {
@@ -202,7 +201,7 @@
                          extractLyricsDynamic(instance)
                      }
                  }
-@@ -218,16 +284,16 @@
+@@ -218,16 +283,16 @@
      }
  
      private fun extractLyricsDynamic(instance: Any) {
@@ -222,7 +221,7 @@
              return
          }
          
-@@ -243,7 +309,7 @@
+@@ -243,7 +308,7 @@
                  return
              }
              
@@ -231,7 +230,7 @@
              
              val firstLine = lines.firstOrNull()
              if (firstLine == null) return
-@@ -288,7 +354,9 @@
+@@ -288,7 +353,9 @@
              
              if (lyricLines.isNotEmpty()) {
                  lastLyricDataHash = hash
@@ -242,7 +241,7 @@
              }
          } catch (e: Exception) {
              Log.e(TAG, "Failed to extract lyrics: ${e.message}")
-@@ -326,20 +394,21 @@
+@@ -326,20 +393,21 @@
              fields["duration"] = numberFields[1]
          }
          
@@ -269,7 +268,7 @@
          knownClassPatterns.addAll(listOf(
              "com.tencent.qqmusic.common.utils.lyric.f",
              "com.tencent.qqmusic.common.utils.lyric.e",
-@@ -351,15 +420,15 @@
+@@ -351,15 +419,15 @@
              try {
                  val clazz = className.toClassOrNull(appClassLoader)
                  if (clazz != null) {
@@ -288,7 +287,7 @@
                          hookAllConstructors(clazz)
                      }
                  }
-@@ -377,13 +446,13 @@
+@@ -377,13 +445,13 @@
              if (linesField == null) return
              
              detectedLinesFieldName = linesField.name
@@ -305,7 +304,7 @@
                          val instance = this.instance ?: return@after
                          
                          Thread {
-@@ -395,12 +464,51 @@
+@@ -395,12 +463,51 @@
              }
              
              isLyricClassHooked = true
@@ -358,7 +357,7 @@
      private fun isInstrumentalPlaceholder(lyrics: List<RichLyricLine>): Boolean {
          if (lyrics.size > 3) return false
          val text = lyrics.joinToString("") { it.text ?: "" }
-@@ -410,16 +518,84 @@
+@@ -410,16 +517,84 @@
                 text.contains("Instrumental")
      }
      
@@ -448,7 +447,7 @@
              originalLyrics = null
              translationLyrics = null
              lastLyricDataHash = 0
-@@ -431,31 +607,68 @@
+@@ -431,31 +606,68 @@
              val titleWords = currentSongTitle.split(" ", "(", "（", "-", "～", "~", "[", "【")
                  .filter { it.isNotBlank() && it.length >= 2 }
              
@@ -528,7 +527,7 @@
      }
      
      private fun sendEmptyLyrics() {
-@@ -470,14 +683,18 @@
+@@ -470,14 +682,18 @@
          )
          
          provider?.player?.setSong(song)
@@ -550,7 +549,7 @@
          
          if (original == null && translation == null) {
              return
-@@ -494,24 +711,41 @@
+@@ -494,24 +710,41 @@
          }
          
          val merged = mutableListOf<RichLyricLine>()
@@ -599,7 +598,7 @@
          sendLyrics(merged)
      }
  
-@@ -528,7 +762,7 @@
+@@ -528,7 +761,7 @@
                              handleMetadataChange(metadata)
                          }
                      }
@@ -608,7 +607,7 @@
                  }
  
                  if (method.name == "setPlaybackState" && method.parameterCount == 1) {
-@@ -538,7 +772,7 @@
+@@ -538,7 +771,7 @@
                              provider?.player?.setPlaybackState(state)
                          }
                      }
@@ -617,7 +616,7 @@
                  }
              }
          }.onFailure { e ->
-@@ -566,48 +800,102 @@
+@@ -566,48 +799,102 @@
          currentSongArtist = artist
          currentSongDuration = duration
  
@@ -734,7 +733,7 @@
          val song = Song(
              id = currentSongId!!,
              name = currentSongTitle,
-@@ -618,4 +906,15 @@
+@@ -618,4 +905,15 @@
  
          provider?.player?.setSong(song)
      }
