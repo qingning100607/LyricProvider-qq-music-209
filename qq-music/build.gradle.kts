@@ -19,15 +19,14 @@ configure<ApplicationExtension> {
     }
 
     defaultConfig {
+        
         applicationId = "io.github.proify.lyricon.qmprovider"
         minSdk = 27
         targetSdk = rootProject.extra.get("targetSdkVersion") as Int
-        versionCode = 20204
-        versionName = "2.0.4"
-
+        versionCode = 20205
+        versionName = "2.0.5"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-
     signingConfigs {
         create("release") {
             storeFile = file(System.getenv("RELEASE_STORE_FILE") ?: "release.jks")
@@ -36,7 +35,6 @@ configure<ApplicationExtension> {
             keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
         }
     }
-
     buildTypes {
         getByName("debug") {
             signingConfig = signingConfigs.getByName("release")
@@ -44,8 +42,7 @@ configure<ApplicationExtension> {
         getByName("release") {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
-            // 注意：本机（proot/交叉环境）开启资源压缩会产出缺少 AndroidManifest.xml 的坏包，
-            // 这里关闭资源压缩，仅保留代码混淆
+            // proot/交叉环境下资源压缩会产出缺 AndroidManifest 的坏包，关闭
             isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

@@ -10,7 +10,7 @@ import com.highcapable.yukihookapi.YukiHookAPI
 import com.highcapable.yukihookapi.annotation.xposed.InjectYukiHookWithXposed
 import com.highcapable.yukihookapi.hook.xposed.proxy.IYukiHookXposedInit
 
-@InjectYukiHookWithXposed(modulePackageName = Constants.PROVIDER_PACKAGE_NAME)
+@InjectYukiHookWithXposed(modulePackageName = Constants.MODULE_PACKAGE_NAME)
 open class HookEntry : IYukiHookXposedInit {
 
     override fun onHook() {

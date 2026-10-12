@@ -7,6 +7,10 @@
 package io.github.proify.lyricon.qmprovider.xposed
 
 object Constants {
+    /** 本模块 APK 的实际包名（applicationId），供 YukiHookAPI / LSPosed 识别模块自身 */
+    const val MODULE_PACKAGE_NAME: String = "io.github.proify.lyricon.qmprovider"
+
+    /** 向词幕注册的 Provider 标识（保持上游一致，确保词幕能识别） */
     const val PROVIDER_PACKAGE_NAME: String = "io.github.proify.lyricon.qmprovider"
     const val MUSIC_PACKAGE_NAME: String = "com.tencent.qqmusic"
 
