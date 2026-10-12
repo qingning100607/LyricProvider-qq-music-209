@@ -25,6 +25,11 @@ import java.util.Locale
 object DiskSongCache {
 
     private const val TAG = "DiskSongCache"
+
+    /** 缓存格式版本：改动缓存写入逻辑时升这个号，老缓存会在初始化时被整目录清空一次 */
+    private const val CACHE_VERSION = 2
+    private const val VERSION_FILE = "cache_version"
+
     private lateinit var cacheRootDir: File
     private lateinit var localizedLyricDir: File
 
@@ -33,8 +38,28 @@ object DiskSongCache {
         cacheRootDir = File(context.filesDir, "lyricon")
         localizedLyricDir = File(cacheRootDir, "lyrics/$currentLocale")
 
+        migrateIfNeeded()
         if (!localizedLyricDir.exists()) {
             localizedLyricDir.mkdirs()
+        }
+    }
+
+    /**
+     * 缓存版本迁移：版本号不符时把整个 lyrics 目录清空一次。
+     *
+     * 旧版本曾把纯音乐替换成固定文案写进缓存，而那句文案恰好与 QQ 服务器给纯音乐的
+     * 原文**完全相同**，按内容无法区分新旧 —— 所以用版本号一刀切，最可靠。
+     */
+    private fun migrateIfNeeded() {
+        runCatching {
+            val versionFile = File(cacheRootDir, VERSION_FILE)
+            val current = if (versionFile.exists()) versionFile.readText().trim() else ""
+            if (current != CACHE_VERSION.toString()) {
+                val lyricsDir = File(cacheRootDir, "lyrics")
+                if (lyricsDir.exists()) lyricsDir.deleteRecursively()
+                lyricsDir.mkdirs()
+                versionFile.writeText(CACHE_VERSION.toString())
+            }
         }
     }
 

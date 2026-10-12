@@ -19,14 +19,16 @@ configure<ApplicationExtension> {
     }
 
     defaultConfig {
-        
-        applicationId = "io.github.proify.lyricon.qmprovider"
+        // 换包名：避免与上游/旧版冲突
+        applicationId = "com.qingning100607.lyricon.qmprovider"
         minSdk = 27
         targetSdk = rootProject.extra.get("targetSdkVersion") as Int
-        versionCode = 20205
-        versionName = "2.0.5"
+        versionCode = 40306
+        versionName = "4.3.6"
+
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+
     signingConfigs {
         create("release") {
             storeFile = file(System.getenv("RELEASE_STORE_FILE") ?: "release.jks")
@@ -35,9 +37,11 @@ configure<ApplicationExtension> {
             keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
         }
     }
+
     buildTypes {
         getByName("debug") {
             signingConfig = signingConfigs.getByName("release")
+            // 使用默认 debug 签名，无需自备 keystore
         }
         getByName("release") {
             signingConfig = signingConfigs.getByName("release")
