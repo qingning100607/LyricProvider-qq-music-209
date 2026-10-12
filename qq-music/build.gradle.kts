@@ -23,8 +23,8 @@ configure<ApplicationExtension> {
         applicationId = "com.qingning100607.lyricon.qmprovider"
         minSdk = 27
         targetSdk = rootProject.extra.get("targetSdkVersion") as Int
-        versionCode = 40306
-        versionName = "4.3.6"
+        versionCode = 20210
+        versionName = "2.0.10"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

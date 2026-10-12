@@ -4,8 +4,8 @@
 
 走的是下载路：hook 系统 MediaSession 判定换歌，拿到当前歌曲的数字 songId，用上游的 `:share:qrckit` 从 QQ 音乐服务器下载已经分好轨的 QRC 歌词，直接交给词幕。分轨和逐字都是服务器给的，本地不再判断"哪条是原文、哪条是翻译"。
 
-- 包名：`com.qingning100607.lyricon.qmprovider`（4.3.6 起换到这个包名，和上游模块包名区分开）
-- 当前版本：4.3.6（versionCode 40306）
+- 包名：`com.qingning100607.lyricon.qmprovider`（4.3.x 起换到这个包名，和上游模块包名区分开）
+- 当前版本：2.0.10（versionCode 20210）
 - 目标 App：`com.tencent.qqmusic`
 - 本仓库只含 `qq-music` 模块，编译需要上游项目的根构建配置，用法见「构建」
 
@@ -15,8 +15,8 @@
 
 | APK | 说明 |
 |---|---|
-| `QQMusicProvider-4.3.6-release.apk` | 正式版，**不写日志**，日常用这个 |
-| `QQMusicProvider-4.3.6-debug.apk` | 带日志，出问题时用（日志路径见下） |
+| `QQMusicProvider-2.0.10-release.apk` | 正式版，**不含日志**（本仓库的源码就是它），日常用这个 |
+| `QQMusicProvider-2.0.10-debug.apk` | 带日志，出问题时用（日志路径见下） |
 
 1. 安装 APK，在 LSPosed 里启用模块，作用域勾选 QQ 音乐（含 `:QQPlayerService`）；
 2. **如果之前装过 `io.github.proify.lyricon.qmprovider`（2.x 那版），先把它卸掉或关掉模块开关** —— 两个都开会让两边都往词幕推歌词；
@@ -68,7 +68,9 @@ QrcDownloader.downloadLyrics(songId)
 
 ## 日志
 
-只有 **debug 版**写日志（正式版里 `flog` 直接短路返回，什么也不写）：
+**正式版不含日志**：本仓库源码里没有 flog，编译出来的 APK 里连日志字符串都搜不到，不会创建任何日志文件。
+
+排查问题时换 **debug APK**，它写这两个地方：
 
 ```
 /data/data/com.tencent.qqmusic/files/lyricon_debug.log

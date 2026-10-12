@@ -9,7 +9,6 @@ package io.github.proify.lyricon.qmprovider.xposed
 import android.app.Application
 import android.media.MediaMetadata
 import android.media.session.PlaybackState
-import android.util.Log
 import com.highcapable.yukihookapi.hook.entity.YukiBaseHooker
 import io.github.proify.lyricon.lyric.model.LyricWord
 import io.github.proify.lyricon.lyric.model.RichLyricLine
@@ -27,15 +26,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -55,7 +50,6 @@ import java.util.concurrent.ConcurrentHashMap
 object QQMusic : YukiBaseHooker() {
 
     private const val TAG = "QQMusicProvider"
-    private const val LOG_NAME = "lyricon_debug.log"
 
     private const val MEDIA_SESSION_CLASS = "android.media.session.MediaSession"
 
@@ -104,19 +98,17 @@ object QQMusic : YukiBaseHooker() {
     @Volatile private var songInfoField: Field? = null
 
     override fun onHook() {
-        flog("=== onHook: process=$processName ===")
 
         onAppLifecycle {
             onCreate {
                 hostApplication = this
                 DiskSongCache.initialize(this)
-                flog("app onCreate: dir=${filesDir.absolutePath}")
             }
             onTerminate { scope.cancel() }
         }
 
-        runCatching { hookMediaSession() }.onFailure { flog("hookMediaSession failed: $it") }
-        runCatching { managerInstance() }.onFailure { flog("manager lookup failed: $it") }
+        runCatching { hookMediaSession() }
+        runCatching { managerInstance() }
     }
 
     /* ------------------------------------------------------------------ */
@@ -125,7 +117,6 @@ object QQMusic : YukiBaseHooker() {
 
     private fun hookMediaSession() {
         val cls = MEDIA_SESSION_CLASS.toClass(appClassLoader) ?: run {
-            flog("✗ MediaSession class not found")
             return
         }
         var n = 0
@@ -151,7 +142,6 @@ object QQMusic : YukiBaseHooker() {
                 }
             }
         }
-        flog("hooked MediaSession x$n")
     }
 
     private fun onMetadata(md: MediaMetadata) {
@@ -169,7 +159,6 @@ object QQMusic : YukiBaseHooker() {
         songTitle = title
         songArtist = artist
         md.getLong(MediaMetadata.METADATA_KEY_DURATION).takeIf { it > 0 }?.let { songDuration = it }
-        flog("换歌: mediaId=$mediaId title=$title artist=$artist")
 
         clearScreen(key)
         scope.launch { resolveAndPush(key, 0) }
@@ -211,16 +200,13 @@ object QQMusic : YukiBaseHooker() {
                 retryStale(key, attempt) { resolveAndPush(key, it) }
                 return
             }
-            flog("管理器: songId=$id")
             push(id)
             return
         }
 
         // ② 兜底：按「歌名 + 歌手」搜索
-        flog("管理器不可用，改用搜索")
         val found = resolveBySearch(songTitle, songArtist)
         if (found == null) {
-            flog("✗ 找不到这首歌: title=$songTitle artist=$songArtist")
             return
         }
         if (found == pushedId) {
@@ -233,10 +219,8 @@ object QQMusic : YukiBaseHooker() {
     /** 解析结果仍是上一首：判过期，退避重试；超过上限就放弃（保持清屏） */
     private suspend fun retryStale(key: String, attempt: Int, again: suspend (Int) -> Unit) {
         if (attempt >= STALE_RETRY_MAX) {
-            flog("解析结果始终是上一首，放弃本次（保持清屏）: key=$key")
             return
         }
-        flog("解析结果仍是上一首，判为过期，重试 ${attempt + 1}/$STALE_RETRY_MAX")
         delay(STALE_RETRY_STEP_MS * (attempt + 1))
         again(attempt + 1)
     }
@@ -263,7 +247,6 @@ object QQMusic : YukiBaseHooker() {
         if (cls == null) {
             if (!managerLookupDone) {
                 managerLookupDone = true
-                flog("✗ 管理器类不存在（已改名？）: $LOAD_MANAGER_CLASS → 走搜索兜底")
             }
             return null
         }
@@ -274,7 +257,6 @@ object QQMusic : YukiBaseHooker() {
             }?.also { it.isAccessible = true }?.get(null)
         }.getOrNull()?.let {
             managerInstance = it
-            flog("✓ 管理器单例（静态字段）: ${cls.name}")
             return it
         }
         // 静态无参方法，返回类型为该类本身（如 U()）
@@ -284,12 +266,10 @@ object QQMusic : YukiBaseHooker() {
             }?.also { it.isAccessible = true }?.invoke(null)
         }.getOrNull()?.let {
             managerInstance = it
-            flog("✓ 管理器单例（静态方法）: ${cls.name}")
             return it
         }
         if (!managerLookupDone) {
             managerLookupDone = true
-            flog("△ 管理器类在，但取不到单例 → 走搜索兜底")
         }
         return null
     }
@@ -307,12 +287,10 @@ object QQMusic : YukiBaseHooker() {
 
         pickBest(title, artist, list)?.let { best ->
             val id = best.optLong("songid", 0L)
-            flog("搜索「$keyword」→ 命中「${best.optString("songname")}」/ ${singersOf(best)} (songid=$id)")
             if (id > 0) return@runCatching id.toString()
         }
-        flog("搜索「$keyword」没有足够匹配的结果")
         null
-    }.onFailure { flog("resolveBySearch error: $it") }.getOrNull()
+    }.getOrNull()
 
     private fun pickBest(title: String, artist: String, list: JSONArray): JSONObject? {
         val nt = norm(title)
@@ -365,12 +343,11 @@ object QQMusic : YukiBaseHooker() {
             } else {
                 conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
             }
-            if (code !in 200..299) flog("HTTP $code for $urlStr")
             body
         } finally {
             conn.disconnect()
         }
-    }.onFailure { flog("httpGet error: $it") }.getOrNull()
+    }.getOrNull()
 
     /* ------------------------------------------------------------------ */
     /* 推送                                                                */
@@ -381,15 +358,12 @@ object QQMusic : YukiBaseHooker() {
         if (songId == pushedId) return
         // provider 未就绪时**不占用 pushedId** —— 否则这首歌会被去重挡住，一直不出词
         if (!ensureProvider()) {
-            flog("✗ provider 未就绪（不占用 pushedId，等下一次换歌事件重试）")
             return
         }
         pushedId = songId
         pushedKey = currentKey
-        flog("→ 推送 songId=$songId title=$songTitle")
 
         DiskSongCache.get(songId)?.let { cached ->
-            flog("cache hit")
             setSong(cached)
             return
         }
@@ -409,7 +383,6 @@ object QQMusic : YukiBaseHooker() {
         scope.launch {
             try {
                 val lines = QrcDownloader.downloadLyrics(songId).parsedLyric.richLyricLines
-                flog("downloaded ${lines.size} lines for $songId")
                 if (lines.isNotEmpty()) {
                     // 行尾钳制 + 逐字裁剪：消除行间重叠，恢复词幕的 YoYo 切行动画
                     val fixed = clampOverlaps(lines)
@@ -427,7 +400,6 @@ object QQMusic : YukiBaseHooker() {
                     if (songId == pushedId && pushedKey == currentKey) setSong(song)
                 }
             } catch (e: Exception) {
-                flog("✗ download failed for $songId: $e")
             } finally {
                 downloading.remove(songId)
             }
@@ -449,9 +421,8 @@ object QQMusic : YukiBaseHooker() {
                     register()
                     player.setDisplayTranslation(true)
                 }
-                flog("provider registered")
                 true
-            }.onFailure { flog("✗ initProvider failed: $it") }.getOrDefault(false)
+            }.getOrDefault(false)
         }
     }
 
@@ -481,7 +452,6 @@ object QQMusic : YukiBaseHooker() {
         // 乱序时 nextBegin 可能小于 cur.begin，会把一条正常行钳成 1ms。先按时间排。
         val sorted = lines.sortedBy { it.begin }
 
-        var clamped = 0
         val out = ArrayList<RichLyricLine>(sorted.size)
         for (i in sorted.indices) {
             val cur = sorted[i]
@@ -491,13 +461,11 @@ object QQMusic : YukiBaseHooker() {
                 val newEnd = (nextBegin - 1).coerceAtLeast(cur.begin + 1)
                 if (newEnd < cur.end) {
                     out.add(cur.copy(end = newEnd, duration = (newEnd - cur.begin).coerceAtLeast(1)))
-                    clamped++
                     continue
                 }
             }
             out.add(cur)
         }
-        if (clamped > 0) flog("行尾钳制: $clamped 行（消除行间重叠，恢复切行动画）")
         return out
     }
 
@@ -511,7 +479,6 @@ object QQMusic : YukiBaseHooker() {
      * 只裁逐字时间，窗口本身不动：这一行什么时候出现、什么时候切走都不变。
      */
     private fun fitWordsToWindow(lines: List<RichLyricLine>): List<RichLyricLine> {
-        var clamped = 0
         val out = lines.map { line ->
             val words = line.words
             if (words.isNullOrEmpty()) return@map line
@@ -522,10 +489,8 @@ object QQMusic : YukiBaseHooker() {
                 if (b == w.begin && e == w.end) w
                 else LyricWord(text = w.text, begin = b, end = e, duration = e - b)
             }
-            clamped++
             line.copy(words = kept.ifEmpty { null })
         }
-        if (clamped > 0) flog("逐字裁剪: $clamped 行")
         return out
     }
 
@@ -537,25 +502,6 @@ object QQMusic : YukiBaseHooker() {
     /* 日志 / 工具                                                          */
     /* ------------------------------------------------------------------ */
 
-    private fun flog(msg: String) {
-        // 正式版不带日志（release 里 BuildConfig.DEBUG = false，这段整个不会执行）；
-        // 排查用的 debug 版照常写文件。
-        if (!BuildConfig.DEBUG) return
-        Log.i(TAG, msg)
-        val line = "${SimpleDateFormat("HH:mm:ss.SSS", Locale.US).format(Date())} [$processName] $msg\n"
-        LOG_PATHS.forEach { path ->
-            runCatching {
-                val f = File(path)
-                f.parentFile?.mkdirs()
-                f.appendText(line)
-            }
-        }
-    }
-
     private val NORM_REGEX = Regex("[\\s\\p{Punct}·・（）()【】\\[\\]《》～~、，。！？：；“”‘’—–]")
 
-    private val LOG_PATHS = arrayOf(
-        "/data/data/com.tencent.qqmusic/files/$LOG_NAME",
-        "/sdcard/Android/data/com.tencent.qqmusic/files/$LOG_NAME"
-    )
 }
