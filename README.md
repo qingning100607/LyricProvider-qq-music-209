@@ -2,7 +2,7 @@
 
 词幕（Lyricon）的歌词提供插件：把 QQ 音乐正在播放的歌的歌词（原文 / 翻译 / 罗马音 + 逐字）送到状态栏渲染。
 
-走的是下载路：hook 系统 MediaSession 判定换歌，拿到当前歌曲的数字 songId，用上游的 `:share:qrckit` 从 QQ 音乐服务器下载已经分好轨的 QRC 歌词，直接交给词幕。分轨和逐字都是服务器给的，本地不再判断"哪条是原文、哪条是翻译"。
+走下载路：hook 系统 MediaSession 判定换歌，拿到当前歌曲的数字 songId，用上游的 `:share:qrckit` 从 QQ 音乐服务器下载已经分好轨的 QRC 歌词，直接交给词幕。分轨和逐字都是服务器给的，本地不再判断"哪条是原文、哪条是翻译"。
 
 - 包名：`com.qingning100607.lyricon.qmprovider`（4.3.x 起换到这个包名，和上游模块包名区分开）
 - 当前版本：2.0.10（versionCode 20210）
@@ -22,7 +22,7 @@
 2. **如果之前装过 `io.github.proify.lyricon.qmprovider`（2.x 那版），先把它卸掉或关掉模块开关** —— 两个都开会让两边都往词幕推歌词；
 3. 强制停止 QQ 音乐再打开。
 
-## 工作原理
+## 工作
 
 ### 触发：系统 MediaSession（不随 App 版本失效）
 
@@ -32,14 +32,14 @@ hook android.media.session.MediaSession.setMetadata / setPlaybackState
   TITLE / ARTIST / DURATION → 元数据
 ```
 
-### 换歌流程（关键，别改坏）
+### 换歌流程
 
 1. 元数据 key 变化 → 记下 `currentKey`；
 2. **clearScreen()**：立刻推一首空歌词占位，把上一首从状态栏清掉 —— 清屏**不动 `pushedId`**（去重标记），否则后面"管理器还返回上一首"会被误推出去；
 3. `resolveAndPush()`：取 songId（见下）——若解析结果 == `pushedId`（管理器还没更新、返回的是上一首），判为**过期**，退避重试（最多 6 次，间隔 400ms×n），期间保持清屏；
 4. `push()`：真正推送（按 `pushedId` 去重），下载完成后补上歌词。
 
-### 取 songId：两条路互为兜底
+### 取 songId
 
 ```
 ① 管理器（不联网）
@@ -47,7 +47,7 @@ hook android.media.session.MediaSession.setMetadata / setPlaybackState
    结构查找单例（静态字段 / 静态无参方法，返回类型是该类本身）
    → 取其中类型为 com.tencent.qqmusicplayerprocess.songinfo.SongInfo 的字段
    → SongInfo.C3() 得到数字 songId
-② 兜底（联网）
+② 联网
    拿 TITLE + ARTIST 去 c.y.qq.com 搜索；歌名必须匹配（分数门槛），否则放弃
 ```
 
@@ -64,7 +64,7 @@ QrcDownloader.downloadLyrics(songId)
 
 - **纯音乐**：一律透传服务器返回的内容，不做关键词过滤、不改文案。
 - 磁盘缓存：`files/lyricon/lyrics/<语言>/<songId>.json.gz`（JSON + deflate）。缓存带 `CACHE_VERSION`，改动写入逻辑时升号即可让老缓存整目录清一次。
-- 迟到的下载会**双校验**（`songId == pushedId && pushedKey == currentKey`）后才推，避免切歌后旧歌的下载把刚清掉的屏幕又刷回旧歌词。
+- 迟到的下载会**双校验**（`songId == pushedId && pushedKey == currentKey`）后推，避免切歌后旧歌的下载把刚清掉的屏幕又刷回旧歌词。
 
 ## 日志
 
@@ -120,7 +120,7 @@ release 有两个点（`proguard-rules.pro` 里已经包含第一条）：
 
 - 需要联网下载歌词。服务器上没有该曲目的 QRC 时拿不到歌词；首次播放要等下载完成，之后走磁盘缓存。
 - 管理器单例与 `SongInfo.C3()` 都是 QQ 内部实现，升级后可能要重新核对；核对不上时会自动退回「歌名 + 歌手」搜索。
-- 只针对 20.9.0.8（versionCode 7458）做过适配。
+- 此版本在QQ音乐 20.9.0.8（versionCode 7458）测试通过。
 
 ## 许可与致谢
 
