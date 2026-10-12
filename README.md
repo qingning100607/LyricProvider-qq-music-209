@@ -2,7 +2,7 @@
 
 词幕（Lyricon）的歌词提供插件：把 QQ 音乐正在播放的歌的歌词（原文 / 翻译 / 罗马音 + 逐字）送到状态栏渲染。
 
-走下载路：hook 系统 MediaSession 判定换歌，拿到当前歌曲的数字 songId，用上游的 `:share:qrckit` 从 QQ 音乐服务器下载已经分好轨的 QRC 歌词，直接交给词幕。分轨和逐字都是服务器给的，本地不再判断"哪条是原文、哪条是翻译"。
+走下载：hook 系统 MediaSession 判定换歌，拿到当前歌曲的数字 songId，用上游的 `:share:qrckit` 从 QQ 音乐服务器下载已经分好轨的 QRC 歌词，直接交给词幕。分轨和逐字都是服务器给的，本地不再判断"原文与翻译"。
 
 - 包名：`com.qingning100607.lyricon.qmprovider`（4.3.x 起换到这个包名，和上游模块包名区分开）
 - 当前版本：2.0.10（versionCode 20210）
@@ -11,16 +11,15 @@
 
 ## 安装
 
-编译好的 APK 在 [Releases](https://github.com/qingning100607/LyricProvider-qq-music-209/releases)。里面有两个：
+编译好的 APK 在 [Releases](https://github.com/qingning100607/LyricProvider-qq-music-209/releases)。
 
 | APK | 说明 |
 |---|---|
-| `QQMusicProvider-2.0.10-release.apk` | 正式版，**不含日志**（本仓库的源码就是它），日常用这个 |
+| `QQMusicProvider-2.0.10-release.apk` | 正式版，**不含日志**（本仓库的源码就是它），日常使用 |
 | `QQMusicProvider-2.0.10-debug.apk` | 带日志，出问题时用（日志路径见下） |
 
 1. 安装 APK，在 LSPosed 里启用模块，作用域勾选 QQ 音乐（含 `:QQPlayerService`）；
-2. **如果之前装过 `io.github.proify.lyricon.qmprovider`（2.x 那版），先把它卸掉或关掉模块开关** —— 两个都开会让两边都往词幕推歌词；
-3. 强制停止 QQ 音乐再打开。
+2. 强制停止 QQ 音乐再打开。
 
 ## 工作
 
@@ -57,20 +56,20 @@ hook android.media.session.MediaSession.setMetadata / setPlaybackState
 QrcDownloader.downloadLyrics(songId)
   → parsedLyric.richLyricLines（已分好轨：原文/翻译/罗马音 + 逐字）
   → clampOverlaps() 行尾钳制，消掉行间重叠（恢复词幕的 YoYo 切行动画）
-  → fitWordsToWindow() 把逐字裁进本行窗口（避免两行高亮动画叠着走）
+  → fitWordsToWindow() 把逐字裁进本行窗口(避免动画折叠)
   → 翻译占位符 "//" 置空
   → 磁盘缓存后 setSong
 ```
 
-- **纯音乐**：一律透传服务器返回的内容，不做关键词过滤、不改文案。
+- **纯音乐**：遵循上游。
 - 磁盘缓存：`files/lyricon/lyrics/<语言>/<songId>.json.gz`（JSON + deflate）。缓存带 `CACHE_VERSION`，改动写入逻辑时升号即可让老缓存整目录清一次。
-- 迟到的下载会**双校验**（`songId == pushedId && pushedKey == currentKey`）后推，避免切歌后旧歌的下载把刚清掉的屏幕又刷回旧歌词。
+- 迟到的下载会**双校验**（`songId == pushedId && pushedKey == currentKey`）后推，避免歌名与歌词显示不符
 
 ## 日志
 
 **正式版不含日志**：本仓库源码里没有 flog，编译出来的 APK 里连日志字符串都搜不到，不会创建任何日志文件。
 
-排查问题时换 **debug APK**，它写这两个地方：
+排查问题时换 **debug APK**，日志路径写在：
 
 ```
 /data/data/com.tencent.qqmusic/files/lyricon_debug.log
@@ -81,7 +80,7 @@ QrcDownloader.downloadLyrics(songId)
 
 | 日志 | 含义 |
 |---|---|
-| `✓ 管理器单例（静态字段/静态方法）` | 权威路线就绪 |
+| `✓ 管理器单例（静态字段/静态方法）` | 路线就绪 |
 | `管理器: songId=xxx` | 拿到当前歌曲 |
 | `→ 推送 songId=xxx` | 已推给词幕 |
 | `downloaded N lines` | 歌词下载成功 |
@@ -92,7 +91,7 @@ QQ 音乐升级后如果不出词，按这个顺序查（装 debug 版看日志�
 
 1. `✗ 管理器类不存在（已改名？）` → 改名了，把新类名填到 `LOAD_MANAGER_CLASS`（或直接走搜索兜底）；
 2. `管理器类在，但取不到单例` → 单例的取法变了，看 `managerInstance()`；
-3. `✗ 找不到这首歌` → 搜索兜底也没命中，看歌名/歌手元数据是否正常。
+3. `✗ 找不到这首歌` → 搜索没命中，看歌名/歌手元数据是否正常。
 
 ## 构建
 
@@ -111,7 +110,7 @@ rm -rf qq-music && cp -r /path/to/this-repo/qq-music ./
 ./gradlew :qq-music:assembleRelease
 ```
 
-release 有两个点（`proguard-rules.pro` 里已经包含第一条）：
+release 两点（`proguard-rules.pro` 里已经包含第一条）：
 
 1. `-keep class io.github.proify.lyricon.qmprovider.** { *; }`：R8 混淆会让 `assets/xposed_init` 里的入口类名失配，模块直接失效。
 2. 某些 proot / 容器环境需要 `android.enableResourceOptimizations=false` 和 `android.enableResourceShrinking=false`，否则产出的 APK 会缺 `AndroidManifest.xml` / `resources.arsc`。
